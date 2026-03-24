@@ -1,0 +1,31 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Legacy / huge PH population rasters (Vietnam build uses World Bank + synthetic grid)
+src/data/population-grid-20m.json
+src/data/population-grid-data.json
+src/data/highres-pop-grid.json
+src/data/highres-pop-test.json
+src/data/ph-coastline.json
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

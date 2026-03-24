@@ -1,0 +1,830 @@
+import { MNOS } from '../config/app-config.js';
+
+/**
+ * TowerIntel Vietnam — Filter Panel (v4.0 — Unified Hierarchical Layers)
+ * Databases nest under parent layer categories. Parent toggles act as master switches.
+ */
+
+// Map upload sourceType to a parent layer category
+const SOURCE_TO_CATEGORY = {
+  MY_ASSETS: 'towers',
+  MNO_Viettel: 'mno',
+  MNO_Vinaphone: 'mno',
+  MNO_Mobifone: 'mno',
+  MNO_Vietnamobile: 'mno',
+  MNO_Globe: 'mno',
+  MNO_Smart: 'mno',
+  MNO_DITO: 'mno',
+  Viettel: 'mno',
+  Vinaphone: 'mno',
+  Mobifone: 'mno',
+  Vietnamobile: 'mno',
+  Globe: 'mno',
+  Smart: 'mno',
+  DITO: 'mno',
+  COMPETITOR: 'mno',
+  Competitor: 'mno',
+  SEARCH_RING: 'searchRings',
+  STRATEGIC_Discovery: 'strategy'
+};
+
+function getDatasetCategory(datasetName) {
+  return localStorage.getItem(`category-${datasetName}`) || 'towers';
+}
+
+function setDatasetCategory(datasetName, category) {
+  localStorage.setItem(`category-${datasetName}`, category);
+}
+
+export function categoryFromSourceType(sourceType) {
+  return SOURCE_TO_CATEGORY[sourceType] || 'towers';
+}
+
+/** Escape for safe use in HTML attributes and text (prevents XSS from dataset names). */
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function groupDatasetsByCategory(datasets) {
+  const groups = { towers: [], mno: [], signalHeatmap: [], searchRings: [], strategy: [] };
+  datasets.forEach(d => {
+    const cat = getDatasetCategory(d);
+    if (groups[cat]) groups[cat].push(d);
+    else groups.towers.push(d); // fallback
+  });
+  return groups;
+}
+
+/** Defaults match existing static checkbox defaults on first paint. */
+const LAYER_TOGGLE_DEFAULTS = {
+  towers: true,
+  mno: true,
+  heatmap: true,
+  population: false,
+  strategy: true,
+  searchRings: true,
+  networkIntel: false,
+  potentialLandbankAreas: true
+};
+
+function layerCheckedAttr(ls, key) {
+  const def = LAYER_TOGGLE_DEFAULTS[key];
+  const v = ls && typeof ls[key] === 'boolean' ? ls[key] : def;
+  return v ? 'checked' : '';
+}
+
+function renderDatasetItem(d, activeDatasets) {
+  const isActive = activeDatasets.has(d);
+  const safe = escapeHtml(d);
+  return `
+    <div class="dataset-item" style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 5px 8px; margin-left: 18px; margin-top: 4px;">
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <label class="checkbox-item" style="font-size: 9px; margin: 0;">
+          <input type="checkbox" class="ds-check" data-name="${safe}" ${isActive ? 'checked' : ''} />
+          <span class="cb-label" style="font-weight: 500; font-size: 9px;">📁 ${safe}</span>
+        </label>
+        <div style="display: flex; gap: 6px;">
+          <button class="export-ds" data-name="${safe}" title="Export Layer" style="background: transparent; border: none; color: #00e5ff; font-size: 11px; cursor: pointer; padding: 0 4px;">📥</button>
+          <button class="delete-ds" data-name="${safe}" title="Delete Layer" style="background: transparent; border: none; color: #ff1744; font-size: 11px; cursor: pointer; padding: 0 4px;">&times;</button>
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-top: 4px;">
+        <input type="color" class="ds-color" data-name="${safe}" value="${localStorage.getItem(`color-${d}`) || '#00e5ff'}" style="width: 100%; height: 18px; border: none; background: transparent; cursor: pointer;" title="Layer Color">
+        <select class="ds-shape" data-name="${safe}" style="font-size: 8px; background: #0b1121; color: #fff; border: 1px solid #333; height: 18px;">
+          <option value="circle" ${localStorage.getItem(`shape-${d}`) === 'circle' ? 'selected' : ''}>Circle</option>
+          <option value="square" ${localStorage.getItem(`shape-${d}`) === 'square' ? 'selected' : ''}>Square</option>
+          <option value="hexagon" ${localStorage.getItem(`shape-${d}`) === 'hexagon' ? 'selected' : ''}>Hexagon</option>
+          <option value="star" ${localStorage.getItem(`shape-${d}`) === 'star' ? 'selected' : ''}>Star</option>
+        </select>
+        <input type="number" class="ds-size" data-name="${safe}" value="${localStorage.getItem(`size-${d}`) || '20'}" min="5" max="100" style="font-size: 8px; background: #0b1121; color: #fff; border: 1px solid #333; height: 18px; width: 100%;" title="Marker Size">
+      </div>
+    </div>`;
+}
+
+const RASTER_LABELS = { globeRSRP: 'RSRP raster (sample)' };
+
+const SCORE_TERRAINS = ['Dense Urban', 'Urban', 'Suburban', 'Rural'];
+const SCORE_MNOS = MNOS;
+
+/** Default ≥ distance (km) for colocation: nearest MNO must be at least this far. */
+const DEFAULT_DIST_BY_TERRAIN = {
+  'Dense Urban': { minKm: 0.35 },
+  'Urban': { minKm: 0.5 },
+  'Suburban': { minKm: 0.75 },
+  'Rural': { minKm: 1.5 },
+};
+
+function buildDistanceThresholdInputs(settings) {
+  const dist = settings?.scoring?.distanceThresholds || {};
+  return SCORE_MNOS.map((mno) => {
+    const rows = SCORE_TERRAINS.map((terr) => {
+      const def = DEFAULT_DIST_BY_TERRAIN[terr] || { minKm: 0.5 };
+      const row = dist[mno]?.[terr] || {};
+      const minKm = row.minKm ?? row.highKm ?? row.lowKm ?? def.minKm;
+      const safeTerr = escapeHtml(terr);
+      const safeMno = escapeHtml(mno);
+      return `<div style="display:grid;grid-template-columns:1fr 64px;gap:6px;align-items:center;font-size:9px;margin-bottom:2px;">
+        <span style="color:#94a3b8;">${safeTerr} <span style="color:#64748b;font-size:8px;">≥ km</span></span>
+        <input type="number" step="0.05" min="0.05" class="setting-dist-min" data-mno="${safeMno}" data-terrain="${safeTerr}" value="${minKm}" title="Minimum distance to nearest MNO site (km) for colocation potential" style="font-size:8px;padding:2px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+      </div>`;
+    }).join('');
+    return `<div style="margin-top:6px;padding:8px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid #334155;">
+      <div style="font-size:10px;font-weight:700;color:#00e5ff;margin-bottom:4px;">${escapeHtml(mno)} <span style="font-weight:400;color:#64748b;">— min distance (km)</span></div>
+      ${rows}
+    </div>`;
+  }).join('');
+}
+
+export function renderFilters(container, { datasets, activeDatasets, onFilterChange, onFileUpload, onKMLUpload, onExport, onClearData, onSearch, onMeasureToggle, onSyncOSM, onSyncMNO, onDatasetToggle, onDatasetDelete, onParentDatasetToggle = null, rasterLayers = {}, onDeleteRaster, towerFilterColumn = '', towerFilterValue = 'All', towerColumns = [], towerValuesByColumn = {}, mnoFilterColumn = '', mnoFilterValue = 'All', mnoColumns = [], mnoValuesByColumn = {}, landbankMinPopulation = 2000, landbankUrbanOnly = true, settings = null, onSettingsChange = null, onSettingsCancel = null, layersState = null, satelliteState = null, accessState = null }) {
+  if (!container) return;
+
+  const effectiveSettings = settings || {
+    coordFormat: 'DD',
+    terrainThresholds: { denseUrban: 9000, urban: 5000, suburban: 3000 },
+    scoring: {
+      distanceThresholds: {},
+      popScoreThresholds: { high: 30000, mid: 10000, low: 2000 },
+      weights: { distance: 0.70, structural: 0.10, population: 0.20 }
+    }
+  };
+
+  const groups = groupDatasetsByCategory(datasets);
+  const rasterEntries = Object.entries(rasterLayers || {});
+  const towerValueOptions = towerFilterColumn && towerValuesByColumn[towerFilterColumn] ? ['All', ...towerValuesByColumn[towerFilterColumn]] : ['All'];
+  const mnoValueOptions = mnoFilterColumn && mnoValuesByColumn[mnoFilterColumn] ? ['All', ...mnoValuesByColumn[mnoFilterColumn]] : ['All'];
+
+  const tt = effectiveSettings.terrainThresholds || {};
+  const pst = effectiveSettings.scoring?.popScoreThresholds || {};
+  const wt = effectiveSettings.scoring?.weights || {};
+  const canUpload = accessState?.canUpload !== false;
+  const canDownload = accessState?.canDownload !== false;
+  const isOwner = accessState?.owner === true;
+  const accessEmail = accessState?.email || '';
+  const accessLabel = isOwner
+    ? 'Owner (full access)'
+    : (accessState?.active === false
+      ? 'Deactivated by owner'
+      : `View ${accessState?.canView ? 'ON' : 'OFF'} · Upload ${canUpload ? 'ON' : 'OFF'} · Download ${canDownload ? 'ON' : 'OFF'}`);
+
+  container.innerHTML = `
+    <div class="filters-header">
+      <h3 class="panel-title">Intelligence Hub (v4.0)</h3>
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button type="button" id="toggle-settings" class="text-btn" title="Settings" style="font-size: 16px; padding: 2px 8px;">⚙</button>
+        <button id="export-btn" class="text-btn" style="color: #00e5ff; ${canDownload ? '' : 'opacity:.55;cursor:not-allowed;'}" ${canDownload ? '' : 'disabled title="Download permission required"'}>Export</button>
+        <button id="reset-filters" class="text-btn">Reset</button>
+      </div>
+    </div>
+    <div class="filter-group" style="margin-bottom: 10px; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(100,116,139,0.25); background: rgba(0,0,0,0.2);">
+      <div style="font-size: 9px; color: #64748b; text-transform: uppercase; letter-spacing: .4px;">Access Status</div>
+      <div style="font-size: 11px; color: #cbd5e1; margin-top: 2px;">${escapeHtml(accessLabel)}</div>
+      ${accessEmail ? `<div style="font-size: 9px; color: #94a3b8; margin-top: 2px;">${escapeHtml(accessEmail)}</div>` : ''}
+    </div>
+
+    <div id="settings-panel" style="display: none; margin-bottom: 12px; padding: 10px; background: rgba(0,229,255,0.04); border: 1px solid rgba(0,229,255,0.2); border-radius: 10px;">
+      <div style="font-size: 10px; font-weight: 700; color: #00e5ff; margin-bottom: 8px;">⚙ Settings</div>
+      <div style="display: grid; gap: 8px;">
+        <div>
+          <label style="font-size: 9px; color: #94a3b8;">Coordinate display</label>
+          <select id="setting-coord-format" class="filter-select" style="font-size: 10px; padding: 4px 6px; width: 100%; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px;">
+            <option value="DD" ${effectiveSettings.coordFormat === 'DD' ? 'selected' : ''}>Decimal degrees (DD)</option>
+            <option value="DMS" ${effectiveSettings.coordFormat === 'DMS' ? 'selected' : ''}>Degrees minutes seconds (DMS)</option>
+            <option value="DDM" ${effectiveSettings.coordFormat === 'DDM' ? 'selected' : ''}>Degrees decimal minutes (DDM)</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size: 9px; color: #94a3b8;">Geo Context radius</label>
+          <select id="setting-terrain-radius" class="filter-select" style="font-size: 10px; padding: 4px 6px; width: 100%; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px;" disabled>
+            <option value="radius_1km" selected>1km (fixed)</option>
+          </select>
+        </div>
+        <div style="font-size: 9px; color: #64748b;">Terrain from 1km population (thresholds)</div>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;">
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">Dense Urban ≥</label>
+            <input type="number" id="setting-thresh-dense" min="0" step="100" value="${tt.denseUrban ?? 9000}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">Urban ≥</label>
+            <input type="number" id="setting-thresh-urban" min="0" step="100" value="${tt.urban ?? 5000}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">Suburban ≥</label>
+            <input type="number" id="setting-thresh-suburban" min="0" step="100" value="${tt.suburban ?? 3000}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+        </div>
+        <div style="font-size: 9px; color: #64748b;">Score weights & population tiers</div>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;">
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">W distance</label>
+            <input type="number" id="setting-w-d" min="0" max="1" step="0.05" value="${wt.distance ?? 0.7}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">W struct</label>
+            <input type="number" id="setting-w-s" min="0" max="1" step="0.05" value="${wt.structural ?? 0.1}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">W pop</label>
+            <input type="number" id="setting-w-p" min="0" max="1" step="0.05" value="${wt.population ?? 0.2}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;">
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">Pop score high ≥</label>
+            <input type="number" id="setting-pop-high" min="0" step="500" value="${pst.high ?? 30000}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">Pop mid ≥</label>
+            <input type="number" id="setting-pop-mid" min="0" step="500" value="${pst.mid ?? 10000}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+          <div>
+            <label style="font-size: 8px; color: #94a3b8;">Pop low ≥</label>
+            <input type="number" id="setting-pop-low" min="0" step="500" value="${pst.low ?? 2000}" style="width:100%;font-size:9px;padding:4px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+          </div>
+        </div>
+        ${buildDistanceThresholdInputs(effectiveSettings)}
+        <div style="display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(148,163,184,0.25);">
+          <button type="button" id="settings-save-btn" style="flex:1;font-size:10px;padding:8px 10px;border-radius:6px;border:1px solid #00e5ff;background:rgba(0,229,255,0.15);color:#00e5ff;cursor:pointer;font-weight:600;">Save</button>
+          <button type="button" id="settings-cancel-btn" style="flex:1;font-size:10px;padding:8px 10px;border-radius:6px;border:1px solid #64748b;background:transparent;color:#94a3b8;cursor:pointer;">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Search Box -->
+    <div class="filter-group" style="margin-bottom: 16px;">
+      <label class="filter-label">Search Site</label>
+      <div style="position: relative;">
+        <input type="text" id="site-search" class="city-select" placeholder="Enter ID or Name..." style="padding-right: 30px;">
+        <span style="position: absolute; right: 10px; top: 50%; transform: translateY(-50%); opacity: 0.5;">🔍</span>
+      </div>
+    </div>
+
+    <!-- UNIFIED MAP LAYERS — Hierarchical -->
+    <div class="filter-group" style="margin-bottom: 16px;">
+      <label class="filter-label" style="margin-bottom: 8px;">Map Layers & Databases</label>
+      <div class="unified-layers" style="display: flex; flex-direction: column; gap: 2px;">
+
+        <!-- OUR TOWERS -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(0,229,255,0.06); border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="layer-towers" ${layerCheckedAttr(layersState, 'towers')} />
+              <span style="font-size: 11px; font-weight: 600; color: #00e5ff;">🏗️ Our Towers</span>
+            </label>
+            <span class="collapse-arrow" data-target="children-towers" style="font-size: 10px; color: #64748b; cursor: pointer; transition: transform 0.2s;">▶</span>
+          </div>
+          <div id="children-towers" class="layer-children" style="display: none; max-height: 300px; overflow-y: auto;">
+            <div class="filter-row" style="margin-left: 18px; margin-top: 6px; margin-bottom: 2px;">
+              <label style="font-size: 9px; color: #94a3b8; margin-right: 6px;">Filter by column:</label>
+              <select id="filter-tower-column" class="filter-select" style="font-size: 10px; padding: 4px 6px; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; min-width: 120px;">
+                <option value="">— None —</option>
+                ${(towerColumns || []).map(c => `<option value="${escapeHtml(c)}" ${c === towerFilterColumn ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="filter-row" style="margin-left: 18px; margin-bottom: 4px;">
+              <label style="font-size: 9px; color: #94a3b8; margin-right: 6px;">Value:</label>
+              <select id="filter-tower-value" class="filter-select" style="font-size: 10px; padding: 4px 6px; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; min-width: 120px;">
+                ${towerValueOptions.map(o => `<option value="${escapeHtml(o)}" ${o === towerFilterValue ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
+              </select>
+            </div>
+            ${groups.towers.map(d => renderDatasetItem(d, activeDatasets)).join('')}
+          </div>
+        </div>
+
+        <!-- MNO SITES -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(0,230,118,0.06); border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="layer-mno" ${layerCheckedAttr(layersState, 'mno')} />
+              <span style="font-size: 11px; font-weight: 600; color: #00e676;">📡 MNO Sites</span>
+            </label>
+            <span class="collapse-arrow" data-target="children-mno" style="font-size: 10px; color: #64748b; cursor: pointer; transition: transform 0.2s;">▶</span>
+          </div>
+          <div id="children-mno" class="layer-children" style="display: none; max-height: 300px; overflow-y: auto;">
+            <div class="filter-row" style="margin-left: 18px; margin-top: 6px; margin-bottom: 2px;">
+              <label style="font-size: 9px; color: #94a3b8; margin-right: 6px;">Filter by column:</label>
+              <select id="filter-mno-column" class="filter-select" style="font-size: 10px; padding: 4px 6px; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; min-width: 120px;">
+                <option value="">— None —</option>
+                ${(mnoColumns || []).map(c => `<option value="${escapeHtml(c)}" ${c === mnoFilterColumn ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="filter-row" style="margin-left: 18px; margin-bottom: 4px;">
+              <label style="font-size: 9px; color: #94a3b8; margin-right: 6px;">Value:</label>
+              <select id="filter-mno-value" class="filter-select" style="font-size: 10px; padding: 4px 6px; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; min-width: 120px;">
+                ${mnoValueOptions.map(o => `<option value="${escapeHtml(o)}" ${o === mnoFilterValue ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}
+              </select>
+            </div>
+            ${groups.mno.map(d => renderDatasetItem(d, activeDatasets)).join('')}
+          </div>
+        </div>
+
+        <!-- SIGNAL HEATMAP (includes sync datasets + Globe RSRP / signal rasters with delete) -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(255,152,0,0.06); border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="layer-heatmap" ${layerCheckedAttr(layersState, 'heatmap')} />
+              <span style="font-size: 11px; font-weight: 600; color: #ff9800;">📶 Signal Heatmap</span>
+            </label>
+            <span class="collapse-arrow" data-target="children-signalHeatmap" style="font-size: 10px; color: #64748b; cursor: pointer; transition: transform 0.2s;">${groups.signalHeatmap.length + rasterEntries.length > 0 ? '▶' : ''}</span>
+          </div>
+          <div id="children-signalHeatmap" class="layer-children" style="display: none; max-height: 300px; overflow-y: auto;">
+            ${groups.signalHeatmap.map(d => renderDatasetItem(d, activeDatasets)).join('')}
+            ${rasterEntries.map(([key, r]) => `
+            <div class="dataset-item" style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 5px 8px; margin-left: 18px; margin-top: 4px; display: flex; align-items: center; justify-content: space-between;">
+              <label class="checkbox-item" style="font-size: 9px; margin: 0;">
+                <input type="checkbox" class="raster-cb" data-raster-key="${escapeHtml(key)}" ${r.visible ? 'checked' : ''} />
+                <span class="cb-label" style="font-weight: 500; font-size: 9px;">🗺️ ${escapeHtml(RASTER_LABELS[key] || key)}</span>
+              </label>
+              <button class="raster-delete text-btn" data-raster="${escapeHtml(key)}" title="Remove layer" style="font-size: 12px; color: #ff1744; padding: 0 4px;">×</button>
+            </div>
+            `).join('')}
+            <p class="heatmap-data-source" style="font-size: 9px; color: #64748b; margin: 8px 0 0 18px; line-height: 1.3;">Data: OpenCelliD, WiGle, or simulated OpenSignal. Rasters: operator RSRP / signal quality uploads.</p>
+          </div>
+        </div>
+
+        <!-- POPULATION DENSITY -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="layer-population" ${layerCheckedAttr(layersState, 'population')} />
+              <span style="font-size: 11px; font-weight: 600; color: #94a3b8;">👥 Population Density</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- STRATEGIC TARGETS (sync data + Potential Landbank Areas) -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(255,214,0,0.06); border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="layer-strategy" ${layerCheckedAttr(layersState, 'strategy')} />
+              <span style="font-size: 11px; font-weight: 600; color: #ffd600;">🎯 Strategic Targets</span>
+            </label>
+            <span class="collapse-arrow" data-target="children-strategy" style="font-size: 10px; color: #64748b; cursor: pointer; transition: transform 0.2s;">▶</span>
+          </div>
+          <div id="children-strategy" class="layer-children" style="display: none; max-height: 300px; overflow-y: auto;">
+            <div class="dataset-item" style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 5px 8px; margin-left: 18px; margin-top: 4px;">
+              <label class="checkbox-item" style="font-size: 9px; margin: 0;">
+                <input type="checkbox" id="layer-potential-landbank" ${layerCheckedAttr(layersState, 'potentialLandbankAreas')} />
+                <span class="cb-label" style="font-weight: 500; font-size: 9px;">📍 Potential Landbank Areas</span>
+              </label>
+              <p style="font-size: 8px; color: #64748b; margin: 4px 0 4px 0;">2–3 MNO missing, filtered by population &amp; terrain.</p>
+              <p style="font-size: 7px; color: #64748b; margin: 0 0 4px 0; line-height: 1.35;" title="Landbank does not scan every map pixel — it samples ~12k cells. Map colors = density (people/km²); Min pop = total people within the terrain radius (500m–1.5km), so a yellow patch can still be below your threshold.">
+                <strong style="color:#94a3b8;">Note:</strong> map = density; min pop = people in radius (not the same). Remote clusters are sampled sparsely — lower min pop or add MNO data, then toggle layer off/on to recompute.
+              </p>
+              <div class="filter-row" style="display: flex; align-items: center; gap: 6px; margin-top: 4px;">
+                <label for="landbank-min-pop" style="font-size: 8px; color: #94a3b8;">Min pop. (any ring):</label>
+                <input id="landbank-min-pop" type="number" min="0" step="500" value="${landbankMinPopulation}" title="Minimum people in the largest of WorldPop sums: 500 m, 1 km, or 1.5 km ring (avoids 500 m grid-alignment gaps). Terrain &amp; Urban/Dense filter still use the 1 km sum." style="flex: 1; font-size: 9px; padding: 2px 4px; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px;">
+              </div>
+              <div class="filter-row" style="display: flex; align-items: center; gap: 6px; margin-top: 4px;">
+                <input type="checkbox" id="landbank-urban-only" ${landbankUrbanOnly ? 'checked' : ''} />
+                <label for="landbank-urban-only" style="font-size: 8px; color: #94a3b8; margin: 0;" title="Uses Settings → terrain thresholds vs WorldPop people within ~1 km (population_1km), updated live when you change thresholds.">Urban / Dense Urban only</label>
+              </div>
+              <button id="export-landbank" class="text-btn" style="margin-top: 6px; font-size: 9px; padding: 4px 6px; border-radius: 4px; border: 1px solid rgba(255,214,0,0.5); color: #ffd600; background: rgba(255,214,0,0.06);">
+                Export Landbank Points (CSV)
+              </button>
+            </div>
+            ${groups.strategy.map(d => renderDatasetItem(d, activeDatasets)).join('')}
+          </div>
+        </div>
+
+        <!-- SEARCH RINGS -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(0,229,255,0.04); border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="layer-search-rings" ${layerCheckedAttr(layersState, 'searchRings')} />
+              <span style="font-size: 11px; font-weight: 600; color: #00e5ff;">📌 Search Rings</span>
+            </label>
+            <span class="collapse-arrow" data-target="children-searchRings" style="font-size: 10px; color: #64748b; cursor: pointer; transition: transform 0.2s;">${groups.searchRings.length > 0 ? '▶' : ''}</span>
+          </div>
+          <div id="children-searchRings" class="layer-children" style="display: none; max-height: 300px; overflow-y: auto;">
+            ${groups.searchRings.map(d => renderDatasetItem(d, activeDatasets)).join('')}
+          </div>
+        </div>
+
+        <!-- NETWORK INTEL -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(156,39,176,0.08); border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="layer-network-intel" ${layerCheckedAttr(layersState, 'networkIntel')} />
+              <span style="font-size: 11px; font-weight: 600; color: #ce93d8;">📶 Network Intel</span>
+            </label>
+            <span style="font-size: 8px; color: #9c27b0; background: rgba(156,39,176,0.15); padding: 1px 6px; border-radius: 8px;">Geohash</span>
+          </div>
+        </div>
+
+        <!-- SATELLITE VIEW -->
+        <div class="layer-parent">
+          <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 6px;">
+            <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="toggle-satellite" ${typeof satelliteState === 'boolean' ? (satelliteState ? 'checked' : '') : ''} />
+              <span style="font-size: 11px; font-weight: 600; color: #00e5ff;">🛰️ Satellite View</span>
+            </label>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Strategic Intelligence & Upload -->
+    <div id="ingestion-box" class="filter-group" style="margin-bottom: 16px; padding: 12px; background: rgba(255, 214, 0, 0.05); border: 1px dashed rgba(255, 214, 0, 0.3); border-radius: 10px;">
+      <label class="filter-label" style="color: #ffd600; margin-bottom: 8px; display: block;">Strategic Landbanking Intel</label>
+      
+      <div style="margin-bottom: 10px;">
+        <label class="filter-label" style="font-size: 10px; opacity: 0.8; margin-bottom: 4px; display: block;">Select Intelligence Sources:</label>
+        <div class="source-selector" style="display: flex; flex-wrap: wrap; gap: 4px;">
+          <label class="source-tag active" data-source="opencellid">OpenCelliD</label>
+          <label class="source-tag active" data-source="wigle">Wigle.net</label>
+          <label class="source-tag active" data-source="beacondb">BeaconDB</label>
+          <label class="source-tag active" data-source="opensignal_sim">OpenSignal</label>
+          <label class="source-tag active" data-source="cellmapper_sim">CellMapper</label>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px;">
+        <button id="sync-osm" class="mno-btn" style="background: rgba(0,229,255,0.1); border-color: #00e5ff; color: #00e5ff; ${canUpload ? '' : 'opacity:.55;cursor:not-allowed;'}" ${canUpload ? '' : 'disabled title="Upload permission required"'}>Sync Road Gaps</button>
+        <button id="sync-opencellid" class="mno-btn" style="background: rgba(255,214,0,0.1); border-color: #ffd600; color: #ffd600; ${canUpload ? '' : 'opacity:.55;cursor:not-allowed;'}" ${canUpload ? '' : 'disabled title="Upload permission required"'}>Sync Multiple Sources</button>
+      </div>
+
+      <div style="margin-bottom: 10px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 10px;">
+        <label class="filter-label" style="font-size: 10px; opacity: 0.8;">Upload New Site List (As Layer):</label>
+        <select id="upload-source-type" class="filter-select" style="font-size: 11px; padding: 4px; height: 30px;">
+          <option value="MY_ASSETS">Our Assets</option>
+          <option value="MNO_Viettel">Viettel Site List</option>
+          <option value="MNO_Vinaphone">Vinaphone Site List</option>
+          <option value="MNO_Mobifone">Mobifone Site List</option>
+          <option value="MNO_Vietnamobile">Vietnamobile Site List</option>
+          <option value="COMPETITOR">Competitor Data</option>
+        </select>
+      </div>
+
+      <input type="file" id="csv-upload" accept=".csv, .xlsx, .xls" style="display: none;">
+      <button id="upload-trigger" class="mno-btn active" style="width: 100%; border: none; margin-bottom: 8px; ${canUpload ? '' : 'opacity:.55;cursor:not-allowed;'}" ${canUpload ? '' : 'disabled title="Upload permission required"'}>Upload & Create Folder</button>
+      
+      <input type="file" id="kml-upload" accept=".kml" style="display: none;">
+      <button id="kml-upload-trigger" class="mno-btn" style="width: 100%; border: 1px solid #00e5ff; color: #00e5ff; background: rgba(0,229,255,0.08); ${canUpload ? '' : 'opacity:.55;cursor:not-allowed;'}" ${canUpload ? '' : 'disabled title="Upload permission required"'}>📌 Import Search Rings (KML)</button>
+    </div>
+
+    <div class="filter-group">
+      <label class="filter-label">Target MNO (for Scoring/Export)</label>
+      <div class="mno-group">
+        <button class="mno-btn active" data-mno="All">Comp.</button>
+        ${MNOS.map((m) => `<button class="mno-btn" data-mno="${escapeHtml(m)}">${escapeHtml(m)}</button>`).join('')}
+      </div>
+    </div>
+
+    <div style="margin-top: 12px;">
+      <button id="clear-data" class="text-btn" style="width: 100%; border: 1px solid rgba(255,23,68,0.3); color: #ff1744; padding: 8px;">Clear All Data</button>
+    </div>
+  `;
+
+  // --- Event Wiring ---
+
+  const readSettingsFromPanel = () => {
+    const terrainThresholds = {
+      denseUrban: Number(container.querySelector('#setting-thresh-dense')?.value ?? 9000),
+      urban: Number(container.querySelector('#setting-thresh-urban')?.value ?? 5000),
+      suburban: Number(container.querySelector('#setting-thresh-suburban')?.value ?? 3000),
+    };
+    const popScoreThresholds = {
+      high: Number(container.querySelector('#setting-pop-high')?.value ?? 30000),
+      mid: Number(container.querySelector('#setting-pop-mid')?.value ?? 10000),
+      low: Number(container.querySelector('#setting-pop-low')?.value ?? 2000),
+    };
+    const weights = {
+      distance: Number(container.querySelector('#setting-w-d')?.value ?? 0.7),
+      structural: Number(container.querySelector('#setting-w-s')?.value ?? 0.1),
+      population: Number(container.querySelector('#setting-w-p')?.value ?? 0.2),
+    };
+    const distanceThresholds = Object.fromEntries(MNOS.map((m) => [m, {}]));
+    for (const mno of SCORE_MNOS) {
+      for (const terr of SCORE_TERRAINS) {
+        const minEl = container.querySelector(`input.setting-dist-min[data-mno="${mno}"][data-terrain="${terr}"]`);
+        const def = DEFAULT_DIST_BY_TERRAIN[terr]?.minKm ?? 0.5;
+        const v = Number(minEl?.value ?? def);
+        distanceThresholds[mno][terr] = {
+          minKm: Number.isFinite(v) && v > 0 ? v : def,
+        };
+      }
+    }
+    return {
+      coordFormat: container.querySelector('#setting-coord-format')?.value || 'DD',
+      terrainPopRadiusKey: 'radius_1km',
+      terrainThresholds,
+      scoring: {
+        distanceThresholds,
+        popRadiusKey: 'radius_1km',
+        popScoreThresholds,
+        weights,
+      },
+    };
+  };
+
+  const toggleSettingsBtn = container.querySelector('#toggle-settings');
+  const settingsPanelEl = container.querySelector('#settings-panel');
+  if (toggleSettingsBtn && settingsPanelEl) {
+    toggleSettingsBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const open = settingsPanelEl.style.display !== 'none';
+      settingsPanelEl.style.display = open ? 'none' : 'block';
+    });
+  }
+  const settingsSaveBtn = container.querySelector('#settings-save-btn');
+  const settingsCancelBtn = container.querySelector('#settings-cancel-btn');
+  if (settingsPanelEl && onSettingsChange && settingsSaveBtn) {
+    settingsSaveBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      onSettingsChange(readSettingsFromPanel());
+      const panel = container.querySelector('#settings-panel');
+      if (panel) panel.style.display = 'none';
+    });
+  }
+  if (settingsCancelBtn) {
+    settingsCancelBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (typeof onSettingsCancel === 'function') onSettingsCancel();
+      const panel = container.querySelector('#settings-panel');
+      if (panel) panel.style.display = 'none';
+    });
+  }
+
+  const getFilters = () => {
+    const satEl = container.querySelector('#toggle-satellite');
+    const towersEl = container.querySelector('#layer-towers');
+    const mnoEl = container.querySelector('#layer-mno');
+    const heatmapEl = container.querySelector('#layer-heatmap');
+    const popEl = container.querySelector('#layer-population');
+    const strategyEl = container.querySelector('#layer-strategy');
+    const searchRingsEl = container.querySelector('#layer-search-rings');
+    const networkIntelEl = container.querySelector('#layer-network-intel');
+    const potentialLandbankEl = container.querySelector('#layer-potential-landbank');
+    const strategyOn = strategyEl ? strategyEl.checked : false;
+    const landbankChildOn = potentialLandbankEl ? potentialLandbankEl.checked : false;
+    const landbankMinPopEl = container.querySelector('#landbank-min-pop');
+    const landbankUrbanOnlyEl = container.querySelector('#landbank-urban-only');
+    const towerColumnEl = container.querySelector('#filter-tower-column');
+    const towerValueEl = container.querySelector('#filter-tower-value');
+    const mnoColumnEl = container.querySelector('#filter-mno-column');
+    const mnoValueEl = container.querySelector('#filter-mno-value');
+    const rasterVisibility = {};
+    container.querySelectorAll('.raster-cb').forEach(cb => {
+      const key = cb.dataset.rasterKey;
+      if (key) rasterVisibility[key] = cb.checked;
+    });
+
+    return {
+      targetMNO: container.querySelector('.mno-group .mno-btn.active')?.dataset.mno || 'All',
+      satellite: satEl ? satEl.checked : false,
+      rasterVisibility,
+      landbankMinPopulation: landbankMinPopEl ? Number(landbankMinPopEl.value || 0) : 2000,
+      landbankUrbanOnly: landbankUrbanOnlyEl ? landbankUrbanOnlyEl.checked : true,
+      towerFilterColumn: towerColumnEl ? towerColumnEl.value : '',
+      towerFilterValue: towerValueEl ? towerValueEl.value : 'All',
+      mnoFilterColumn: mnoColumnEl ? mnoColumnEl.value : '',
+      mnoFilterValue: mnoValueEl ? mnoValueEl.value : 'All',
+      minScore: 0,
+      layers: {
+        towers: towersEl ? towersEl.checked : true,
+        mno: mnoEl ? mnoEl.checked : true,
+        heatmap: heatmapEl ? heatmapEl.checked : false,
+        population: popEl ? popEl.checked : false,
+        strategy: strategyOn,
+        searchRings: searchRingsEl ? searchRingsEl.checked : true,
+        networkIntel: networkIntelEl ? networkIntelEl.checked : false,
+        potentialLandbankAreas: strategyOn && landbankChildOn,
+      }
+    };
+  };
+
+  const updateMap = () => {
+    onFilterChange(getFilters());
+  };
+
+  // Collapse/expand arrows
+  container.querySelectorAll('.collapse-arrow').forEach(arrow => {
+    arrow.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const targetId = arrow.dataset.target;
+      const childDiv = container.querySelector(`#${targetId}`);
+      if (childDiv) {
+        const isHidden = childDiv.style.display === 'none';
+        childDiv.style.display = isHidden ? 'block' : 'none';
+        arrow.textContent = isHidden ? '▼' : '▶';
+      }
+    });
+  });
+
+  // Parent layer checkboxes → also trigger map update (which uses getFilters)
+  container.querySelectorAll('.layer-header input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', updateMap);
+  });
+  const configureParentGroup = ({ parentId, childSelector, datasetNames = [], extraChildSelector = null }) => {
+    const parent = container.querySelector(parentId);
+    if (!parent) return;
+    const apply = () => {
+      const on = parent.checked;
+      const kids = container.querySelectorAll(childSelector);
+      kids.forEach((cb) => {
+        cb.checked = on;
+        cb.disabled = !on;
+        const row = cb.closest('.dataset-item');
+        if (row) row.style.opacity = on ? '1' : '0.45';
+      });
+      if (extraChildSelector) {
+        const extras = container.querySelectorAll(extraChildSelector);
+        extras.forEach((cb) => {
+          cb.checked = on;
+          cb.disabled = !on;
+          const row = cb.closest('.dataset-item');
+          if (row) row.style.opacity = on ? '1' : '0.45';
+        });
+      }
+    };
+    apply();
+    parent.addEventListener('change', (e) => {
+      apply();
+      if (typeof onParentDatasetToggle === 'function') {
+        onParentDatasetToggle(e.target.checked, datasetNames);
+      }
+    });
+  };
+  configureParentGroup({ parentId: '#layer-towers', childSelector: '#children-towers .ds-check', datasetNames: groups.towers });
+  configureParentGroup({ parentId: '#layer-mno', childSelector: '#children-mno .ds-check', datasetNames: groups.mno });
+  configureParentGroup({
+    parentId: '#layer-heatmap',
+    childSelector: '#children-signalHeatmap .ds-check',
+    datasetNames: groups.signalHeatmap,
+    extraChildSelector: '#children-signalHeatmap .raster-cb'
+  });
+  configureParentGroup({ parentId: '#layer-strategy', childSelector: '#children-strategy .ds-check', datasetNames: groups.strategy, extraChildSelector: '#children-strategy #layer-potential-landbank' });
+  configureParentGroup({ parentId: '#layer-search-rings', childSelector: '#children-searchRings .ds-check', datasetNames: groups.searchRings });
+  container.querySelector('#layer-potential-landbank')?.addEventListener('change', (e) => {
+    if (e.target.checked) {
+      const st = container.querySelector('#layer-strategy');
+      if (st && !st.checked) st.checked = true;
+    }
+    updateMap();
+  });
+  container.querySelector('#landbank-min-pop')?.addEventListener('change', updateMap);
+  container.querySelector('#landbank-urban-only')?.addEventListener('change', updateMap);
+  container.querySelectorAll('.raster-cb').forEach(cb => cb.addEventListener('change', updateMap));
+  // Dynamic column filter: when column changes, repopulate value dropdown and reset to All
+  const towerColumnSelect = container.querySelector('#filter-tower-column');
+  const towerValueSelect = container.querySelector('#filter-tower-value');
+  if (towerColumnSelect && towerValueSelect) {
+    towerColumnSelect.addEventListener('change', () => {
+      const col = towerColumnSelect.value;
+      const values = col && towerValuesByColumn[col] ? ['All', ...towerValuesByColumn[col]] : ['All'];
+      towerValueSelect.innerHTML = values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+      towerValueSelect.value = 'All';
+      updateMap();
+    });
+    towerValueSelect.addEventListener('change', updateMap);
+  }
+  const mnoColumnSelect = container.querySelector('#filter-mno-column');
+  const mnoValueSelect = container.querySelector('#filter-mno-value');
+  if (mnoColumnSelect && mnoValueSelect) {
+    mnoColumnSelect.addEventListener('change', () => {
+      const col = mnoColumnSelect.value;
+      const values = col && mnoValuesByColumn[col] ? ['All', ...mnoValuesByColumn[col]] : ['All'];
+      mnoValueSelect.innerHTML = values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+      mnoValueSelect.value = 'All';
+      updateMap();
+    });
+    mnoValueSelect.addEventListener('change', updateMap);
+  }
+
+  // Dataset toggles
+  container.querySelectorAll('.ds-check').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      onDatasetToggle(e.target.dataset.name, e.target.checked);
+    });
+  });
+
+  // Raster deletion (onDeleteRaster in main.js re-renders filter panel with full state)
+  container.querySelectorAll('.raster-delete').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const key = e.target.dataset.raster || e.currentTarget?.dataset?.raster;
+      if (key && confirm(`Remove this raster layer?`)) onDeleteRaster(key);
+    });
+  });
+
+  // Color/Shape/Size changes
+  container.querySelectorAll('.ds-color, .ds-shape, .ds-size').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const name = e.target.dataset.name;
+      let key = '';
+      if (e.target.classList.contains('ds-color')) key = `color-${name}`;
+      else if (e.target.classList.contains('ds-shape')) key = `shape-${name}`;
+      else if (e.target.classList.contains('ds-size')) key = `size-${name}`;
+
+      localStorage.setItem(key, e.target.value);
+      updateMap();
+    });
+  });
+
+  // Delete dataset
+  container.querySelectorAll('.delete-ds').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const name = e.currentTarget.dataset.name || e.target.closest('.delete-ds')?.dataset.name;
+      if (name && onDatasetDelete) onDatasetDelete(name);
+    });
+  });
+
+  // Target MNO events
+  container.querySelectorAll('.mno-group .mno-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const group = btn.closest('.mno-group');
+      if (group) {
+        group.querySelectorAll('.mno-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        updateMap();
+      }
+    });
+  });
+
+  const satToggle = container.querySelector('#toggle-satellite');
+  if (satToggle) {
+    satToggle.addEventListener('change', updateMap);
+  }
+
+  // Upload events
+  const uploadTrigger = container.querySelector('#upload-trigger');
+  const fileInput = container.querySelector('#csv-upload');
+  if (uploadTrigger && fileInput) {
+    uploadTrigger.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      const source = container.querySelector('#upload-source-type').value;
+      if (file && onFileUpload) onFileUpload(file, source);
+    });
+  }
+
+  // KML Upload
+  const kmlTrigger = container.querySelector('#kml-upload-trigger');
+  const kmlInput = container.querySelector('#kml-upload');
+  if (kmlTrigger && kmlInput) {
+    kmlTrigger.addEventListener('click', () => kmlInput.click());
+    kmlInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file && onKMLUpload) onKMLUpload(file);
+    });
+  }
+
+  // Search event
+  const searchInput = container.querySelector('#site-search');
+  if (searchInput && onSearch) {
+    searchInput.addEventListener('input', (e) => onSearch(e.target.value));
+  }
+
+  // Measure is on the map control strip (between zoom and pegman); no sidebar button
+
+  // Intelligence buttons
+  const syncOsmBtn = container.querySelector('#sync-osm');
+  if (syncOsmBtn && onSyncOSM) syncOsmBtn.addEventListener('click', onSyncOSM);
+
+  const syncMnoBtn = container.querySelector('#sync-opencellid');
+  if (syncMnoBtn && onSyncMNO) {
+    syncMnoBtn.addEventListener('click', () => {
+      const selectedSources = [...container.querySelectorAll('.source-tag.active')].map(t => t.dataset.source);
+      onSyncMNO(selectedSources);
+    });
+  }
+
+  // Source tag toggle logic
+  container.querySelectorAll('.source-tag').forEach(tag => {
+    tag.addEventListener('click', () => {
+      tag.classList.toggle('active');
+    });
+  });
+
+  const clearBtn = container.querySelector('#clear-data');
+  if (clearBtn && onClearData) clearBtn.addEventListener('click', onClearData);
+
+  const exportBtn = container.querySelector('#export-btn');
+  if (exportBtn && onExport) exportBtn.addEventListener('click', () => onExport());
+
+  const exportLandbankBtn = container.querySelector('#export-landbank');
+  if (exportLandbankBtn && onExport) {
+    exportLandbankBtn.addEventListener('click', () => onExport('__LANDBANK__'));
+  }
+
+  container.querySelectorAll('.export-ds').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const name = btn.dataset.name;
+      if (onExport) onExport(name);
+    });
+  });
+
+  const resetBtn = container.querySelector('#reset-filters');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      if (confirm('Reset filters?')) location.reload();
+    });
+  }
+
+  return getFilters();
+}
