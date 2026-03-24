@@ -19,6 +19,17 @@ src/data/highres-pop-grid.json
 src/data/highres-pop-test.json
 src/data/ph-coastline.json
 
+# Local heavy assets / scratch data (do not publish)
+Population/
+vector 1/
+raw/
+towerintel-viet_vn_ppp_2020_1km_Aggregated.tif
+*.rar
+*.bil
+*.map
+*.dat
+*.id
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
