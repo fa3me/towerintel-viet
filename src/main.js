@@ -1759,6 +1759,33 @@ async function processData() {
     processDataSync();
 }
 
+/** ~4.4 km grid cells; landbank search radius ≤1.5 km — neighbor buckets avoid O(samples × all MNO sites). */
+const LANDBANK_BUCKET_DEG = 0.04;
+
+function buildMnoSiteGridBuckets(sites) {
+    const m = new Map();
+    for (const s of sites) {
+        if (typeof s.lat !== 'number' || typeof s.lng !== 'number' || !Number.isFinite(s.lat) || !Number.isFinite(s.lng)) continue;
+        const k = `${Math.floor(s.lat / LANDBANK_BUCKET_DEG)}_${Math.floor(s.lng / LANDBANK_BUCKET_DEG)}`;
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(s);
+    }
+    return m;
+}
+
+function sitesInNeighborBuckets(lat, lng, buckets, ring = 2) {
+    const bi = Math.floor(lat / LANDBANK_BUCKET_DEG);
+    const bj = Math.floor(lng / LANDBANK_BUCKET_DEG);
+    const out = [];
+    for (let di = -ring; di <= ring; di++) {
+        for (let dj = -ring; dj <= ring; dj++) {
+            const arr = buckets.get(`${bi + di}_${bj + dj}`);
+            if (arr) out.push(...arr);
+        }
+    }
+    return out;
+}
+
 /**
  * Compute Potential Landbank Areas (Strategic Targets):
  * - Determine geo-context terrain from 1km population thresholds.
@@ -1777,17 +1804,18 @@ async function computePotentialLandbankAreas() {
         return;
     }
 
-    // Sample the population grid (already subsampled from WorldPop for the map). This is a **national**
-    // cap — not one candidate per 1 km pixel — so dense cities can still show few dots vs the heatmap.
-    // Higher = fewer gaps; each candidate still calls getPopulationAtRadii (async).
-    const MAX_POINTS = 50000;
+    // National sample cap; MNO proximity uses spatial buckets (not a full scan of every site per sample).
+    const MAX_POINTS = 18000;
     const results = [];
     const sampledCells = state.populationGrid;
-    // Two interleaved strides so we don't skip whole "strips" of the sorted grid (common in mountains).
     const step = Math.max(1, Math.floor(sampledCells.length / (MAX_POINTS / 2)));
     const strideOffsets = step >= 2 ? [0, Math.floor(step / 2)] : [0];
 
     const allMnoSites = state.mnoSites.filter((s) => MNOS.includes(normalizeMNO(s.mno)));
+    const siteBuckets = buildMnoSiteGridBuckets(allMnoSites);
+    await new Promise((r) => setTimeout(r, 0));
+
+    let landbankIter = 0;
 
     const getSearchRadiusKmByTerrain = (terrain) => {
         if (terrain === 'Dense Urban') return 0.35;
@@ -1808,6 +1836,9 @@ async function computePotentialLandbankAreas() {
 
     for (const offset of strideOffsets) {
         for (let i = offset; i < sampledCells.length; i += step) {
+            landbankIter++;
+            if (landbankIter % 120 === 0) await new Promise((r) => setTimeout(r, 0));
+
             const cell = sampledCells[i];
             const lat = cell.lat, lng = cell.lng;
             if (!isPointInVietnamLand(lat, lng)) continue;
@@ -1820,7 +1851,7 @@ async function computePotentialLandbankAreas() {
             const searchRadiusKm = getSearchRadiusKmByTerrain(terrain);
 
             const hasMno = Object.fromEntries(MNOS.map((m) => [m, false]));
-            for (const site of allMnoSites) {
+            for (const site of sitesInNeighborBuckets(lat, lng, siteBuckets, 2)) {
                 const d = haversineDistance(lat, lng, site.lat, site.lng);
                 if (d <= searchRadiusKm) {
                     const nm = normalizeMNO(site.mno);
