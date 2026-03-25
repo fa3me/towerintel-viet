@@ -1813,9 +1813,10 @@ async function computePotentialLandbankAreas() {
         return;
     }
 
-    // Sample the population grid (already subsampled from WorldPop for the map). Higher = fewer gaps
-    // in remote towns; each candidate still calls getPopulationAtRadii (async) — keep reasonable.
-    const MAX_POINTS = 12000;
+    // Sample the population grid (already subsampled from WorldPop for the map). This is a **national**
+    // cap — not one candidate per 1 km pixel — so dense cities can still show few dots vs the heatmap.
+    // Higher = fewer gaps; each candidate still calls getPopulationAtRadii (async).
+    const MAX_POINTS = 50000;
     const results = [];
     const sampledCells = state.populationGrid;
     // Two interleaved strides so we don't skip whole "strips" of the sorted grid (common in mountains).
