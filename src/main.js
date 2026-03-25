@@ -974,15 +974,37 @@ async function init() {
             updateLayers();
         },
         onSearch: (term) => {
-            if (!term || term.length < 2) return;
-            const trimmed = term.trim();
+            const trimmed = String(term ?? '').trim();
+            if (trimmed.length < 2) {
+                if (state.searchPin) {
+                    state.searchPin = null;
+                    state.searchPinExpiresAt = 0;
+                    updateLayers();
+                }
+                return;
+            }
+
+            const inRangeLat = (v) => Number.isFinite(v) && v >= -90 && v <= 90;
+            const inRangeLng = (v) => Number.isFinite(v) && v >= -180 && v <= 180;
+            const normalizeCoordPair = (a, b) => {
+                if (inRangeLat(a) && inRangeLng(b)) return { lat: a, lng: b };
+                if (inRangeLat(b) && inRangeLng(a)) return { lat: b, lng: a, swapped: true };
+                return null;
+            };
+
             // 1) Try parsing as coordinates: LAT/LONG, lat/long, LNG, lng, latitude/longitude, "16.35581 121.38789", "16.35581, 121.38789"
-            const normalized = trimmed.replace(/\b(?:lat|lng|lon|long|latitude|longitude)\s*:?\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+            const normalized = trimmed
+                .replace(/\b(?:lat|lng|lon|long|latitude|longitude)\s*:?\s*/gi, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
             const coordMatch = normalized.match(/(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)|(-?\d+\.?\d*)\s+(-?\d+\.?\d*)/);
             if (coordMatch) {
-                const lat = parseFloat(coordMatch[1] ?? coordMatch[3]);
-                const lng = parseFloat(coordMatch[2] ?? coordMatch[4]);
-                if (Number.isFinite(lat) && Number.isFinite(lng)) {
+                const a = parseFloat(coordMatch[1] ?? coordMatch[3]);
+                const b = parseFloat(coordMatch[2] ?? coordMatch[4]);
+                const pair = normalizeCoordPair(a, b);
+                if (pair) {
+                    const lat = pair.lat;
+                    const lng = pair.lng;
                     // Coordinate search should not tilt the map
                     currentViewState = {
                         ...currentViewState,
@@ -1000,6 +1022,12 @@ async function init() {
                     updateLayers();
                     return;
                 }
+
+                // If it looked like coordinates but is invalid, don't mutate view state.
+                if (typeof showToast === 'function') {
+                    showToast('Invalid coordinates. Use "lat lng" (e.g. 13.705557 123.192514).', 'warning');
+                }
+                return;
             }
             // 2) Search by ID or name
             const termLower = trimmed.toLowerCase();
