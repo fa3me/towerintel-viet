@@ -357,7 +357,7 @@ export function createPotentialLandbankLayer(data, opts = {}) {
 
 /**
  * Draw polygon for MNO area compare (open path while drawing, closed ring when done).
- * Draft uses only clicked vertices — no cursor rubber-band (avoids jitter when using Finish UI).
+ * Draft uses only clicked vertices — no cursor rubber-band (avoids jitter vs map picks).
  * @param {{ vertices?: number[][], closedRing?: number[][], idSuffix?: string }} opts
  */
 export function createPolygonCompareDrawLayers(opts = {}) {

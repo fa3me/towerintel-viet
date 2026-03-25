@@ -2222,8 +2222,6 @@ function updatePolygonDrawToolbarState() {
     const bar = document.getElementById('polygon-draw-toolbar');
     if (!bar) return;
     const n = state.polygonCompare.vertices.length;
-    const fin = bar.querySelector('#pcc-draw-finish');
-    if (fin) fin.disabled = n < 3;
     const cnt = bar.querySelector('#pcc-draw-count');
     if (cnt) cnt.textContent = `${n} point${n === 1 ? '' : 's'}`;
 }
@@ -2236,16 +2234,20 @@ function showPolygonDrawToolbar() {
     bar.id = 'polygon-draw-toolbar';
     bar.style.cssText = 'position:absolute;left:50%;bottom:110px;transform:translateX(-50%);z-index:220;display:flex;flex-direction:column;gap:8px;align-items:center;padding:10px 14px;background:rgba(15,23,42,0.98);border:1px solid rgba(0,229,255,0.35);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.4);pointer-events:auto;';
     bar.innerHTML = `
-        <div style="font-size:10px;color:#64748b;text-align:center;max-width:280px;line-height:1.35;">Double-click the map or press <strong style="color:#94a3b8">Enter</strong> to finish (≥3 points). Cyan line shows the closing edge.</div>
+        <div style="font-size:10px;color:#64748b;text-align:center;max-width:300px;line-height:1.35;">Double-click the <strong style="color:#94a3b8">map</strong> or press <strong style="color:#94a3b8">Enter</strong> to finish (≥3 points). Cyan line shows the closing edge.</div>
         <div style="display:flex;gap:10px;align-items:center;">
         <span id="pcc-draw-count" style="font-size:12px;color:#94a3b8;">0 points</span>
-        <button type="button" id="pcc-draw-finish" style="font-size:12px;padding:6px 12px;border-radius:8px;border:1px solid #00e5ff;background:rgba(0,229,255,0.15);color:#00e5ff;cursor:pointer;" disabled>Finish polygon</button>
         <button type="button" id="pcc-draw-cancel" style="font-size:12px;padding:6px 12px;border-radius:8px;border:1px solid #64748b;background:transparent;color:#e2e8f0;cursor:pointer;">Cancel</button>
         </div>
     `;
     container.appendChild(bar);
-    bar.querySelector('#pcc-draw-finish')?.addEventListener('click', () => finishPolygonCompareDraw());
-    bar.querySelector('#pcc-draw-cancel')?.addEventListener('click', () => cancelPolygonCompareDraw());
+    // Block pointer events from reaching the Deck canvas (prevents accidental vertices when using Cancel / toolbar)
+    bar.addEventListener('mousedown', (e) => e.stopPropagation());
+    bar.addEventListener('click', (e) => e.stopPropagation());
+    bar.querySelector('#pcc-draw-cancel')?.addEventListener('click', (e) => {
+        e.preventDefault();
+        cancelPolygonCompareDraw();
+    });
     updatePolygonDrawToolbarState();
 }
 
