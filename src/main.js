@@ -50,14 +50,10 @@ import {
     closeCompareRing,
     collectSitesInPolygon,
     aggregateMnoKpisInPolygon,
-    dedupePolygonVertices,
-    aggregatePopulationInPolygon,
-    countMnoSitesByOperatorInPolygon,
-    countOurPortfolioTowersInPolygon,
-    filterSitesByRadioTechnology
+    dedupePolygonVertices
 } from './engine/polygon-compare.js';
 import { renderPolygonComparePanel, removePolygonComparePanel } from './ui/polygon-compare-panel.js';
-import { renderPolygonAreaSummary, clearPolygonAreaSummary } from './ui/polygon-area-summary.js';
+import { clearPolygonAreaSummary } from './ui/polygon-area-summary.js';
 import { initAuthGate, canDownloadCsv, canUpload, getCurrentAccessState } from './auth/auth-gate.js';
 
 /** @typedef {{ coordFormat?: string, terrainPopRadiusKey?: string, terrainThresholds?: { denseUrban?: number, urban?: number, suburban?: number }, scoring?: object }} TiSettings */
@@ -781,47 +777,11 @@ function destroyMapRight() {
     } catch (_) { /* ignore */ }
 }
 
+/** Floating map overlay removed in compare mode — polygon KPIs stay in the bottom dock + comparison bar. */
 function refreshPolygonAreaSummary() {
     const el = document.getElementById('polygon-area-summary');
     if (!el) return;
-    const pc = state.polygonCompare;
-    const ni = state.networkIntel;
-    /** Summary only while Network Intel is on and split-compare is active (avoids stale overlay). */
-    if (!pc.ring?.length || !state.filters.layers.networkIntel || !ni.comparing) {
-        clearPolygonAreaSummary(el);
-        return;
-    }
-    const ring = pc.ring;
-    const ratFilter = pc.ratFilter || 'all';
-    const popAgg = aggregatePopulationInPolygon(state.populationGrid, ring);
-    const sitesAll = getAllMnoSitesForPolygonStats();
-    const counts = countMnoSitesByOperatorInPolygon(sitesAll, ring, { ratFilter });
-    const ourAssetsCount = countOurPortfolioTowersInPolygon(state.towers, ring);
-    const sitesIn = collectSitesInPolygon(sitesAll, ring);
-    const sitesForKpi = filterSitesByRadioTechnology(sitesIn, ratFilter);
-    const omittedByTech = ratFilter !== 'all' ? sitesIn.length - sitesForKpi.length : 0;
-    const statsLeft = aggregateMnoKpisInPolygon(sitesIn, pc.mnoA, { ratFilter });
-    const statsRight = aggregateMnoKpisInPolygon(sitesIn, pc.mnoB, { ratFilter });
-    renderPolygonAreaSummary(el, {
-        visible: true,
-        totalPopulation: popAgg.totalPopulation,
-        avgDensity: popAgg.avgDensity,
-        areaKm2: popAgg.areaKm2,
-        cellsInside: popAgg.cellsInside ?? 0,
-        counts,
-        ourAssetsCount,
-        statsLeft,
-        statsRight,
-        mnoLeft: pc.mnoA,
-        mnoRight: pc.mnoB,
-        ratFilter,
-        omittedByTech,
-        onRatFilterChange: (v) => {
-            pc.ratFilter = v;
-            refreshPolygonAreaSummary();
-            refreshPolygonComparePanel();
-        }
-    });
+    clearPolygonAreaSummary(el);
 }
 
 /** After the right canvas becomes visible, Deck may need an extra frame to read clientWidth/height. */
@@ -950,14 +910,18 @@ async function init() {
                     }
                 });
             }
-            // Show/hide Network Intel panel
+            // Show/hide Network Intel panel (panel stays hidden while split-compare is active — controls are in the top bar)
             const niPanel = document.getElementById('network-intel-panel');
             if (niPanel) {
                 if (newFilters.layers.networkIntel) {
-                    niPanel.classList.add('open');
-                    refreshIntelPanel();
+                    if (!state.networkIntel.comparing) {
+                        niPanel.style.display = '';
+                        niPanel.classList.add('open');
+                        refreshIntelPanel();
+                    }
                 } else {
                     niPanel.classList.remove('open');
+                    niPanel.style.display = '';
                     state.networkIntel.comparing = false;
                     hideComparisonSlider();
                     clearPolygonCompareArea();
@@ -2010,10 +1974,37 @@ function enrichWithPopulation(grid, gridPrecision, addPopOnlyCells = false) {
     }
 }
 
+function applyNetworkIntelMetricChange(m) {
+    const ni = state.networkIntel;
+    const wasPopulation = ni.metric === 'population';
+    ni.metric = m;
+    if (m === 'population' || wasPopulation) {
+        if (m === 'population' && state.populationGrid.length === 0) {
+            loadPopulationGrid().then(() => {
+                rebuildGeohashGrid();
+                updateLayers();
+                refreshIntelPanel();
+            });
+            return;
+        }
+        rebuildGeohashGrid();
+    }
+    updateLayers();
+    refreshIntelPanel();
+}
+
 function refreshIntelPanel() {
     const panel = document.getElementById('network-intel-panel');
     if (!panel) return;
     const ni = state.networkIntel;
+    if (ni.comparing) {
+        panel.classList.remove('open');
+        panel.innerHTML = '';
+        panel.style.display = 'none';
+        if (comparisonSlider?.syncIntelFromState) comparisonSlider.syncIntelFromState(ni);
+        return;
+    }
+    panel.style.display = '';
     const summary = computeSummary(state.geohashGrid);
     renderNetworkIntelPanel(panel, {
         metric: ni.metric,
@@ -2021,20 +2012,20 @@ function refreshIntelPanel() {
         summary,
         comparing: ni.comparing,
         onMetricChange: (m) => {
-            const wasPopulation = ni.metric === 'population';
-            ni.metric = m;
-            // Population metric needs grid rebuild (for population-only cells)
-            if (m === 'population' || wasPopulation) {
-                if (m === 'population' && state.populationGrid.length === 0) {
-                    loadPopulationGrid().then(() => { rebuildGeohashGrid(); updateLayers(); });
-                } else {
-                    rebuildGeohashGrid();
-                }
-            }
-            updateLayers(); refreshIntelPanel();
+            applyNetworkIntelMetricChange(m);
         },
-        onPrecisionChange: (p) => { ni.precision = p; rebuildGeohashGrid(); updateLayers(); },
-        onMNOFilterChange: (mnos) => { ni.mnoFilter = mnos; rebuildGeohashGrid(); updateLayers(); },
+        onPrecisionChange: (p) => {
+            ni.precision = p;
+            rebuildGeohashGrid();
+            updateLayers();
+            refreshIntelPanel();
+        },
+        onMNOFilterChange: (mnos) => {
+            ni.mnoFilter = mnos;
+            rebuildGeohashGrid();
+            updateLayers();
+            refreshIntelPanel();
+        },
         onCompareToggle: (active) => {
             ni.comparing = active;
             if (active) {
@@ -2047,8 +2038,10 @@ function refreshIntelPanel() {
                 }
                 rebuildGeohashGrid();
                 updateLayers();
+                refreshIntelPanel();
             } else {
                 hideComparisonSlider();
+                refreshIntelPanel();
             }
         },
         onClose: () => {
@@ -2071,22 +2064,13 @@ function refreshIntelPanel() {
 }
 
 function showComparisonSlider() {
-    if (comparisonSlider) {
-        comparisonSlider.show();
-        ensureMapRight();
-        syncCompareDeckLayoutFromDom();
-        syncCompareBasemaps();
-        scheduleMirrorDeckResync();
-        refreshPolygonAreaSummary();
-        return;
-    }
-    const container = document.querySelector('.map-container');
-    if (!container) return;
     const ni = state.networkIntel;
-    const quarters = getAvailableQuarters(state.mnoSites);
-    comparisonSlider = createComparisonSlider(container, {
+    const sliderOptions = {
         mnos: [...MNOS],
-        quarters,
+        quarters: getAvailableQuarters(state.mnoSites),
+        metric: ni.metric,
+        precision: ni.precision,
+        mnoFilter: ni.mnoFilter,
         onPositionChange: (x) => {
             ni.sliderPos = x;
             updateLayers();
@@ -2100,7 +2084,6 @@ function showComparisonSlider() {
             if (pc.ring?.length) {
                 pc.mnoA = sel.mno;
                 if (pc.panelOpen) refreshPolygonComparePanel();
-                else refreshPolygonAreaSummary();
             }
             rebuildGeohashGrid();
             updateLayers();
@@ -2111,10 +2094,24 @@ function showComparisonSlider() {
             if (pc.ring?.length) {
                 pc.mnoB = sel.mno;
                 if (pc.panelOpen) refreshPolygonComparePanel();
-                else refreshPolygonAreaSummary();
             }
             rebuildGeohashGrid();
             updateLayers();
+        },
+        onMetricChange: (m) => {
+            applyNetworkIntelMetricChange(m);
+        },
+        onPrecisionChange: (p) => {
+            ni.precision = p;
+            rebuildGeohashGrid();
+            updateLayers();
+            refreshIntelPanel();
+        },
+        onMNOFilterChange: (mnos) => {
+            ni.mnoFilter = mnos;
+            rebuildGeohashGrid();
+            updateLayers();
+            refreshIntelPanel();
         },
         onClose: () => {
             destroyMapRight();
@@ -2124,7 +2121,22 @@ function showComparisonSlider() {
             resyncMapToDeckAfterCompare();
             refreshIntelPanel();
         }
-    });
+    };
+
+    if (comparisonSlider) {
+        comparisonSlider.show();
+        if (comparisonSlider.syncIntelFromState) comparisonSlider.syncIntelFromState(ni);
+        if (comparisonSlider.updateQuarters) comparisonSlider.updateQuarters(getAvailableQuarters(state.mnoSites));
+        ensureMapRight();
+        syncCompareDeckLayoutFromDom();
+        syncCompareBasemaps();
+        scheduleMirrorDeckResync();
+        refreshPolygonAreaSummary();
+        return;
+    }
+    const container = document.querySelector('.map-container');
+    if (!container) return;
+    comparisonSlider = createComparisonSlider(container, sliderOptions);
     comparisonSlider.show();
     ensureMapRight();
     syncCompareDeckLayoutFromDom();
@@ -2138,6 +2150,7 @@ function hideComparisonSlider() {
     destroyMapRight();
     clearPolygonAreaSummary(document.getElementById('polygon-area-summary'));
     resyncMapToDeckAfterCompare();
+    if (state.filters.layers.networkIntel) refreshIntelPanel();
 }
 
 /** Same MNO-site union as rebuildGeohashGrid (for polygon KPI stats). */
@@ -2278,6 +2291,11 @@ function refreshPolygonComparePanel() {
         mnoB: pc.mnoB,
         statsA,
         statsB,
+        ratFilter: pc.ratFilter || 'all',
+        onRatFilterChange: (v) => {
+            pc.ratFilter = v;
+            refreshPolygonComparePanel();
+        },
         onMnoAChange: (m) => {
             pc.mnoA = m;
             state.networkIntel.left.mno = m;
@@ -2337,9 +2355,6 @@ function finishPolygonCompareDraw() {
     updateLayers();
     refreshIntelPanel();
     scheduleMirrorDeckResync();
-
-    const niPanel = document.getElementById('network-intel-panel');
-    if (niPanel) niPanel.classList.add('open');
 
     pc.panelOpen = true;
     refreshPolygonComparePanel();

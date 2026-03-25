@@ -1625,13 +1625,15 @@ body {
 
 .cs-header {
     position: absolute;
-    top: 16px;
+    top: 12px;
     left: 50%;
     transform: translateX(-50%);
     display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 8px 16px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 14px 12px;
+    max-width: min(96vw, 1100px);
     background: rgba(15, 23, 42, 0.95);
     backdrop-filter: blur(16px);
     border: 1px solid rgba(156, 39, 176, 0.3);
@@ -1639,6 +1641,147 @@ body {
     z-index: 2600;
     pointer-events: auto;
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.cs-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.cs-row-mno {
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    gap: 12px;
+}
+
+.cs-row-mno .cs-left-side {
+    flex: 1;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+.cs-row-mno .cs-right-side {
+    flex: 1;
+    justify-content: flex-start;
+    min-width: 0;
+}
+
+.cs-row-mno .cs-close-btn {
+    flex-shrink: 0;
+}
+
+.cs-row-tools {
+    align-items: center;
+    gap: 8px 12px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cs-mini-lbl {
+    font-size: 9px;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+
+.cs-metric {
+    min-width: 160px;
+    max-width: 220px;
+}
+
+.cs-precision-val {
+    font-size: 10px;
+    color: #ce93d8;
+    min-width: 120px;
+    max-width: 160px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.cs-precision-range {
+    width: 100px;
+    accent-color: #9c27b0;
+}
+
+.cs-mno-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    align-items: center;
+    margin-left: auto;
+}
+
+.cs-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 9px;
+    color: #e2e8f0;
+    padding: 2px 6px;
+    border-radius: 6px;
+    border: 1px solid rgba(156, 39, 176, 0.35);
+    background: rgba(0, 0, 0, 0.2);
+    cursor: pointer;
+}
+
+.cs-chip input {
+    margin: 0;
+    cursor: pointer;
+}
+
+.cs-row-legend {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cs-legend-title {
+    font-size: 9px;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex-shrink: 0;
+    padding-top: 2px;
+}
+
+.cs-legend-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    align-items: center;
+    flex: 1;
+    min-height: 22px;
+    max-height: 52px;
+    overflow-y: auto;
+}
+
+.cs-legend-pair {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 8px;
+    color: #64748b;
+    max-width: 140px;
+}
+
+.cs-legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.cs-legend-txt {
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .cs-side {
@@ -1697,7 +1840,7 @@ body {
 
 .cs-handle {
     position: absolute;
-    top: 70px;
+    top: 132px;
     bottom: 40px;
     left: 50%;
     transform: translateX(-50%);

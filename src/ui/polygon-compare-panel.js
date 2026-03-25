@@ -57,6 +57,14 @@ function sideHtml(title, mno, stats, mnoOptions) {
     `;
 }
 
+const RAT_OPTIONS = [
+    { value: 'all', label: 'All tech' },
+    { value: '2g', label: '2G (GSM/EDGE)' },
+    { value: '3g', label: '3G (UMTS)' },
+    { value: '4g', label: '4G / LTE' },
+    { value: '5g', label: '5G (NR)' }
+];
+
 /**
  * @param {HTMLElement} container
  * @param {Object} opts
@@ -64,6 +72,8 @@ function sideHtml(title, mno, stats, mnoOptions) {
  * @param {string} opts.mnoB
  * @param {Object} opts.statsA
  * @param {Object} opts.statsB
+ * @param {string} [opts.ratFilter]
+ * @param {Function} [opts.onRatFilterChange]
  * @param {Function} opts.onMnoAChange
  * @param {Function} opts.onMnoBChange
  * @param {Function} opts.onClearPolygon
@@ -76,6 +86,8 @@ export function renderPolygonComparePanel(container, opts = {}) {
         mnoB = MNOS[1],
         statsA = {},
         statsB = {},
+        ratFilter = 'all',
+        onRatFilterChange = () => {},
         onMnoAChange = () => {},
         onMnoBChange = () => {},
         onClearPolygon = () => {},
@@ -83,6 +95,9 @@ export function renderPolygonComparePanel(container, opts = {}) {
     } = opts;
 
     const mnos = [...MNOS];
+    const ratOptsHtml = RAT_OPTIONS.map(
+        (o) => `<option value="${esc(o.value)}" ${o.value === ratFilter ? 'selected' : ''}>${esc(o.label)}</option>`
+    ).join('');
 
     if (!document.getElementById('polygon-compare-panel-styles')) {
         const st = document.createElement('style');
@@ -96,12 +111,15 @@ export function renderPolygonComparePanel(container, opts = {}) {
                 font-family: Inter, system-ui, sans-serif; overflow: hidden;
             }
             #polygon-compare-dock .pcc-head {
-                display: flex; align-items: center; justify-content: space-between;
+                display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
                 padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.08);
-                flex-shrink: 0;
+                flex-shrink: 0; flex-wrap: wrap;
             }
             #polygon-compare-dock .pcc-head h3 { margin: 0; font-size: 14px; color: #fff; }
             #polygon-compare-dock .pcc-head-sub { font-size: 10px; color: #64748b; margin-top: 2px; }
+            #polygon-compare-dock .pcc-head-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-left: auto; }
+            #polygon-compare-dock .pcc-rat-label { font-size: 10px; color: #94a3b8; display: flex; align-items: center; gap: 6px; }
+            #polygon-compare-dock .pcc-rat-select { font-size: 10px; padding: 4px 8px; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 6px; max-width: 140px; }
             #polygon-compare-dock .pcc-actions { display: flex; gap: 8px; }
             #polygon-compare-dock .pcc-btn {
                 font-size: 11px; padding: 6px 10px; border-radius: 8px; cursor: pointer; border: 1px solid #334155;
@@ -131,11 +149,18 @@ export function renderPolygonComparePanel(container, opts = {}) {
             <div class="pcc-head">
                 <div>
                     <h3>MNO compare — drawn area</h3>
-                    <div class="pcc-head-sub">Map is split: drag handle. Stats respect polygon + optional radio filter (2G–5G) from the top summary bar. KPIs from uploaded site fields.</div>
+                    <div class="pcc-head-sub">Split map: drag handle. KPIs use uploaded site rows inside the polygon; filter by radio generation here.</div>
                 </div>
-                <div class="pcc-actions">
-                    <button type="button" class="pcc-btn" id="pcc-clear-poly">Clear polygon</button>
-                    <button type="button" class="pcc-btn" id="pcc-close-dock">Close</button>
+                <div class="pcc-head-right">
+                    <label class="pcc-rat-label">Radio
+                        <select id="pcc-rat-filter" class="pcc-rat-select" title="Filter MNO upload rows by RAT / technology column">
+                            ${ratOptsHtml}
+                        </select>
+                    </label>
+                    <div class="pcc-actions">
+                        <button type="button" class="pcc-btn" id="pcc-clear-poly">Clear polygon</button>
+                        <button type="button" class="pcc-btn" id="pcc-close-dock">Close</button>
+                    </div>
                 </div>
             </div>
             <div class="pcc-split">
@@ -147,6 +172,9 @@ export function renderPolygonComparePanel(container, opts = {}) {
 
     container.querySelector('#pcc-clear-poly')?.addEventListener('click', onClearPolygon);
     container.querySelector('#pcc-close-dock')?.addEventListener('click', onClose);
+
+    const ratSel = container.querySelector('#pcc-rat-filter');
+    ratSel?.addEventListener('change', () => onRatFilterChange(ratSel.value));
 
     const selA = container.querySelector('.pcc-mno-select[data-side="Left"]');
     const selB = container.querySelector('.pcc-mno-select[data-side="Right"]');

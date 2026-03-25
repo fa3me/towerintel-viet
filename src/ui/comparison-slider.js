@@ -1,10 +1,19 @@
-import { MNOS } from '../config/app-config.js';
+import { MNOS, MNO_HEX } from '../config/app-config.js';
+import { getLegendEntries } from '../engine/network-analysis.js';
 
 /**
  * TowerIntel Vietnam — Comparison Slider
  * Draggable vertical split slider for MNO vs MNO or quarterly timeline comparison.
  * Side-by-side canvases: left strip is interactive; right shows the same geography (view fitted in main).
  */
+
+function precisionLabel(p) {
+    const n = Number(p);
+    if (n <= 5) return 'City (~4.9 km)';
+    if (n <= 6) return 'Neighborhood (~1.2 km)';
+    if (n <= 7) return 'Street (~153 m)';
+    return 'Building (~38 m)';
+}
 
 /**
  * Initialise the comparison slider UI inside the map container.
@@ -15,9 +24,15 @@ import { MNOS } from '../config/app-config.js';
  * @param {Function} options.onLeftChange       ({ mno, quarter }) => void
  * @param {Function} options.onRightChange      ({ mno, quarter }) => void
  * @param {Function} options.onClose            () => void
+ * @param {Function} [options.onMetricChange]   (metric: string) => void
+ * @param {Function} [options.onPrecisionChange] (precision: number) => void
+ * @param {Function} [options.onMNOFilterChange] (mnos: string[]) => void
+ * @param {string} [options.metric]           Initial analysis metric
+ * @param {number} [options.precision]          Initial geohash precision
+ * @param {string[]} [options.mnoFilter]        Which MNOs feed the grid
  * @param {Array<string>} options.mnos          Available MNO names
  * @param {Array<string>} options.quarters      Available quarter labels
- * @returns {{ el: HTMLElement, setPosition: Function, destroy: Function }}
+ * @returns {{ el: HTMLElement, setPosition: Function, destroy: Function, syncIntelFromState: Function }}
  */
 export function createComparisonSlider(container, options = {}) {
     const {
@@ -25,11 +40,33 @@ export function createComparisonSlider(container, options = {}) {
         onLeftChange = () => { },
         onRightChange = () => { },
         onClose = () => { },
+        onMetricChange = () => { },
+        onPrecisionChange = () => { },
+        onMNOFilterChange = () => { },
+        metric: initialMetric = 'rsrp',
+        precision: initialPrecision = 6,
+        mnoFilter: initialMnoFilter = [...MNOS],
         mnos = [...MNOS],
         quarters = ['Current']
     } = options;
 
     let position = 0.5; // normalised 0–1
+    let syncing = false;
+
+    const metricOptions = [
+        ['rsrp', '📡 Coverage (RSRP)'],
+        ['rsrq', '📊 Quality (RSRQ)'],
+        ['congestion', '🔥 Congestion'],
+        ['supply', '🏗️ Supply (Sites)'],
+        ['demand', '📈 Demand'],
+        ['marketShare', '🏆 Market Share'],
+        ['population', '👥 Population Density']
+    ];
+
+    const mnoChipsHtml = MNOS.map((m) => {
+        const on = initialMnoFilter.includes(m) ? 'checked' : '';
+        return `<label class="cs-chip" style="border-color:${MNO_HEX[m] || '#94a3b8'}"><input type="checkbox" value="${m}" ${on}> ${m}</label>`;
+    }).join('');
 
     // ── Root element ─────────────────────────────────────────────────
     const root = document.createElement('div');
@@ -37,26 +74,44 @@ export function createComparisonSlider(container, options = {}) {
     root.className = 'comparison-slider';
     root.innerHTML = `
         <div class="cs-header">
-            <div class="cs-side cs-left-side">
-                <select class="cs-select cs-mno-left" title="Left MNO">
-                    <option value="All">All MNOs</option>
-                    ${mnos.map(m => `<option value="${m}">${m}</option>`).join('')}
-                </select>
-                <select class="cs-select cs-quarter-left" title="Left Quarter">
-                    ${quarters.map(q => `<option value="${q}">${q}</option>`).join('')}
-                </select>
+            <div class="cs-row cs-row-mno">
+                <div class="cs-side cs-left-side">
+                    <select class="cs-select cs-mno-left" title="Left MNO">
+                        <option value="All">All MNOs</option>
+                        ${mnos.map(m => `<option value="${m}">${m}</option>`).join('')}
+                    </select>
+                    <select class="cs-select cs-quarter-left" title="Left Quarter">
+                        ${quarters.map(q => `<option value="${q}">${q}</option>`).join('')}
+                    </select>
+                </div>
+
+                <button class="cs-close-btn" type="button" title="Close comparison">✕</button>
+
+                <div class="cs-side cs-right-side">
+                    <select class="cs-select cs-mno-right" title="Right MNO">
+                        <option value="All">All MNOs</option>
+                        ${mnos.map((m, i) => `<option value="${m}" ${i === 1 ? 'selected' : ''}>${m}</option>`).join('')}
+                    </select>
+                    <select class="cs-select cs-quarter-right" title="Right Quarter">
+                        ${quarters.map(q => `<option value="${q}">${q}</option>`).join('')}
+                    </select>
+                </div>
             </div>
 
-            <button class="cs-close-btn" title="Close comparison">✕</button>
+            <div class="cs-row cs-row-tools">
+                <label class="cs-mini-lbl">Analysis</label>
+                <select class="cs-select cs-metric" title="Heatmap metric">
+                    ${metricOptions.map(([v, lab]) => `<option value="${v}" ${v === initialMetric ? 'selected' : ''}>${lab}</option>`).join('')}
+                </select>
+                <label class="cs-mini-lbl">Grid</label>
+                <span class="cs-precision-val">${precisionLabel(initialPrecision)}</span>
+                <input type="range" class="cs-precision-range" min="5" max="8" step="1" value="${initialPrecision}" title="Geohash resolution" />
+                <div class="cs-mno-chips">${mnoChipsHtml}</div>
+            </div>
 
-            <div class="cs-side cs-right-side">
-                <select class="cs-select cs-mno-right" title="Right MNO">
-                    <option value="All">All MNOs</option>
-                    ${mnos.map((m, i) => `<option value="${m}" ${i === 1 ? 'selected' : ''}>${m}</option>`).join('')}
-                </select>
-                <select class="cs-select cs-quarter-right" title="Right Quarter">
-                    ${quarters.map(q => `<option value="${q}">${q}</option>`).join('')}
-                </select>
+            <div class="cs-row cs-row-legend">
+                <span class="cs-legend-title">Legend</span>
+                <div class="cs-legend-items"></div>
             </div>
         </div>
 
@@ -83,10 +138,30 @@ export function createComparisonSlider(container, options = {}) {
     const quarterLeftSel = root.querySelector('.cs-quarter-left');
     const quarterRightSel = root.querySelector('.cs-quarter-right');
     const closeBtn = root.querySelector('.cs-close-btn');
+    const metricSel = root.querySelector('.cs-metric');
+    const precisionRange = root.querySelector('.cs-precision-range');
+    const precisionValEl = root.querySelector('.cs-precision-val');
+    const legendItemsEl = root.querySelector('.cs-legend-items');
+    const mnoChipInputs = root.querySelectorAll('.cs-mno-chips input');
+
+    function renderLegend(m) {
+        if (!legendItemsEl) return;
+        const entries = getLegendEntries(m) || [];
+        legendItemsEl.innerHTML = entries.slice(0, 8).map((e) => {
+            const lab = String(e.label);
+            const short = lab.length > 20 ? `${lab.slice(0, 18)}…` : lab;
+            return `
+            <span class="cs-legend-pair" title="${lab.replace(/"/g, '&quot;')}">
+                <span class="cs-legend-swatch" style="background:${e.color};"></span>
+                <span class="cs-legend-txt">${short}</span>
+            </span>`;
+        }).join('');
+    }
+
+    renderLegend(initialMetric);
 
     // ── Drag logic ───────────────────────────────────────────────────
     let isDragging = false;
-    // Overlay to protect against map interactions during drag
     const dragOverlay = document.createElement('div');
     dragOverlay.className = 'cs-drag-overlay';
     dragOverlay.style.cssText = 'position:fixed; top:0; left:0; right:0; bottom:0; z-index:9000; cursor:col-resize; display:none;';
@@ -118,8 +193,6 @@ export function createComparisonSlider(container, options = {}) {
             canvasLeft.style.height = '100%';
             canvasLeft.style.width = `${percLeft}%`;
         }
-        // Right vector layers render via @deck.gl/mapbox MapboxOverlay inside #map-right (same camera as tiles).
-        // Legacy #map-canvas-right is unused — keep hidden so it cannot sit above the map.
         if (canvasRight) {
             canvasRight.style.display = 'none';
             canvasRight.style.pointerEvents = 'none';
@@ -196,6 +269,31 @@ export function createComparisonSlider(container, options = {}) {
     quarterLeftSel.addEventListener('change', emitLeft);
     mnoRightSel.addEventListener('change', emitRight);
     quarterRightSel.addEventListener('change', emitRight);
+
+    metricSel.addEventListener('change', () => {
+        if (syncing) return;
+        renderLegend(metricSel.value);
+        onMetricChange(metricSel.value);
+    });
+
+    precisionRange.addEventListener('input', () => {
+        if (syncing) return;
+        const val = parseInt(precisionRange.value, 10);
+        if (precisionValEl) precisionValEl.textContent = precisionLabel(val);
+        onPrecisionChange(val);
+    });
+
+    mnoChipInputs.forEach((cb) => {
+        cb.addEventListener('change', () => {
+            if (syncing) return;
+            const selected = [...mnoChipInputs].filter((c) => c.checked).map((c) => c.value);
+            if (selected.length === 0) {
+                cb.checked = true;
+                return;
+            }
+            onMNOFilterChange(selected);
+        });
+    });
 
     function resetSplitBasemapDom() {
         const mapLeftEl = document.getElementById('map');
@@ -276,6 +374,31 @@ export function createComparisonSlider(container, options = {}) {
         emitRight();
     }
 
+    /**
+     * @param {{ metric?: string, precision?: number, mnoFilter?: string[] }} ni  networkIntel slice
+     */
+    function syncIntelFromState(ni) {
+        if (!ni) return;
+        syncing = true;
+        try {
+            if (ni.metric && metricSel) {
+                metricSel.value = ni.metric;
+                renderLegend(ni.metric);
+            }
+            if (ni.precision != null && precisionRange && precisionValEl) {
+                precisionRange.value = String(ni.precision);
+                precisionValEl.textContent = precisionLabel(ni.precision);
+            }
+            if (Array.isArray(ni.mnoFilter) && mnoChipInputs.length) {
+                mnoChipInputs.forEach((cb) => {
+                    cb.checked = ni.mnoFilter.includes(cb.value);
+                });
+            }
+        } finally {
+            syncing = false;
+        }
+    }
+
     function destroy() {
         window.removeEventListener('mousemove', onPointerMove);
         window.removeEventListener('touchmove', onPointerMove);
@@ -285,5 +408,5 @@ export function createComparisonSlider(container, options = {}) {
         root.remove();
     }
 
-    return { el: root, show, hide, setPosition, getPosition, getSelections, setMNOSelections, updateQuarters, destroy };
+    return { el: root, show, hide, setPosition, getPosition, getSelections, setMNOSelections, updateQuarters, syncIntelFromState, destroy };
 }
