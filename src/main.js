@@ -1961,7 +1961,7 @@ async function computePotentialLandbankAreas() {
                 return d <= landbankMinSeparationKm(terrain);
             });
 
-            if (mnMissing >= 2 && hasAnchorTenant && !nearOurSite) {
+            if (mnMissing >= 2 && !nearOurSite) {
                 results.push({
                     lat,
                     lng,
@@ -1983,8 +1983,13 @@ async function computePotentialLandbankAreas() {
         }
     }
 
-    const deduped = dedupeLandbankCandidatesBySpacing(results);
+    const anchorBacked = results.filter((r) => r.hasAnchorTenant);
+    const baseCandidates = anchorBacked.length > 0 ? anchorBacked : results;
+    const deduped = dedupeLandbankCandidatesBySpacing(baseCandidates);
     state.potentialLandbankAreas = deduped;
+    if (anchorBacked.length === 0 && results.length > 0) {
+        console.log(`ℹ️ Landbank fallback: no anchor-backed candidates in this scope; using non-anchor gaps (${results.length})`);
+    }
     console.log(`✅ Potential Landbank Areas computed (terrain/settings): ${deduped.length}`);
 }
 
