@@ -635,6 +635,35 @@ body {
     overflow: hidden;
 }
 
+/*
+ * Deck.gl tooltip stacking: keep hover cards above WebGL raster points.
+ */
+.map-container .deck-widget-container {
+    z-index: 5000 !important;
+    pointer-events: none;
+}
+
+.map-container .deck-widget-container .fill,
+.map-container .deck-widget-container .top-left {
+    z-index: 5000 !important;
+}
+
+.map-container .deck-tooltip {
+    z-index: 5001 !important;
+    pointer-events: none;
+    isolation: isolate;
+    mix-blend-mode: normal;
+}
+
+/* MapboxOverlay / secondary map may mount tooltip outside .map-container */
+body > .deck-widget-container,
+body .deck-tooltip {
+    z-index: 5000 !important;
+    pointer-events: none;
+    isolation: isolate;
+    mix-blend-mode: normal;
+}
+
 .map {
     width: 100%;
     height: 100%;

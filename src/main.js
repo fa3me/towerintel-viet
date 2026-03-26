@@ -2880,7 +2880,15 @@ function initMap() {
                          </div>
                          <div style="font-size: 9px; color: #475569; margin-top: 10px; font-style: italic; border-top: 1px solid rgba(255,255,255,0.05); pt: 4px;">Raster Source: MapInfo TAB (High-Res)</div>
                        </div>`,
-                style: { background: 'none', border: 'none', padding: '0', zIndex: '999999' }
+                style: {
+                    background: 'rgba(8,12,18,0.98)',
+                    border: '1px solid rgba(0,229,255,0.4)',
+                    borderRadius: '10px',
+                    padding: '0',
+                    zIndex: '999999',
+                    isolation: 'isolate',
+                    mixBlendMode: 'normal'
+                }
             };
         }
         return null;
