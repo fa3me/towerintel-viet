@@ -368,7 +368,9 @@ export function renderFilters(container, { datasets, activeDatasets, onFilterCha
                 <input type="checkbox" id="layer-potential-landbank" ${layerCheckedAttr(layersState, 'potentialLandbankAreas')} />
                 <span class="cb-label" style="font-weight: 500; font-size: 9px;">📍 Potential Landbank Areas</span>
               </label>
-              <p style="font-size: 8px; color: #64748b; margin: 4px 0 4px 0;">2–3 MNO missing, filtered by population &amp; terrain.</p>
+              <p style="font-size: 8px; color: #64748b; margin: 4px 0 4px 0;">
+                2–3 MNO missing, but requiring at least one anchor-tenant MNO nearby; areas too close to Our Sites are skipped.
+              </p>
               <p style="font-size: 7px; color: #64748b; margin: 0 0 4px 0; line-height: 1.35;" title="Landbank scans up to ~18k sample positions (stride over the map grid). MNO proximity uses a spatial index so the app stays responsive. Map = density; min pop = people in 500m–1.5km ring.">
                 <strong style="color:#94a3b8;">Note:</strong> map = density; min pop = people in radius (not the same). Candidates are nationally subsampled (~18k), not a 1 km grid. Toggle layer off/on to recompute after changing filters or MNO data.
               </p>

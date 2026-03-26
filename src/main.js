@@ -1834,6 +1834,15 @@ function collectMnoSitesForLandbankCoverage() {
     return merged.filter((s) => MNOS.includes(normalizeMNO(s.mno || s.anchor || '')));
 }
 
+/** Existing portfolio towers ("Our Sites") to avoid redundant landbank pins nearby. */
+function collectOurSitesForLandbank() {
+    return (state.towers || []).filter((t) => {
+        if (!t) return false;
+        if (!Number.isFinite(Number(t.lat)) || !Number.isFinite(Number(t.lng))) return false;
+        return t.sourceType === 'MY_ASSETS' || t.dataset_name === 'Own Assets';
+    });
+}
+
 function defaultLandbankDistanceByTerrain(terrain) {
     if (terrain === 'Dense Urban') return 0.35;
     if (terrain === 'Urban') return 0.55;
@@ -1902,6 +1911,7 @@ async function computePotentialLandbankAreas() {
 
     const allMnoSites = collectMnoSitesForLandbankCoverage();
     const siteBuckets = buildMnoSiteGridBuckets(allMnoSites);
+    const ourSiteBuckets = buildMnoSiteGridBuckets(collectOurSitesForLandbank());
     await new Promise((r) => setTimeout(r, 0));
 
     let landbankIter = 0;
@@ -1945,12 +1955,18 @@ async function computePotentialLandbankAreas() {
 
             const count = MNOS.filter((m) => hasMno[m]).length;
             const mnMissing = MNOS.length - count;
+            const hasAnchorTenant = count >= 1;
+            const nearOurSite = sitesInNeighborBuckets(lat, lng, ourSiteBuckets, 2).some((s) => {
+                const d = haversineDistance(lat, lng, s.lat, s.lng);
+                return d <= landbankMinSeparationKm(terrain);
+            });
 
-            if (mnMissing >= 2) {
+            if (mnMissing >= 2 && hasAnchorTenant && !nearOurSite) {
                 results.push({
                     lat,
                     lng,
                     mnMissing,
+                    hasAnchorTenant,
                     terrain,
                     searchRadiusKm: Math.max(...Object.values(searchRadiusKmByMno)),
                     searchRadiusM: Math.round(Math.max(...Object.values(searchRadiusKmByMno)) * 1000),
