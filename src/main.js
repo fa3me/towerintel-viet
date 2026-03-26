@@ -1815,16 +1815,77 @@ function sitesInNeighborBuckets(lat, lng, buckets, ring = 2) {
 }
 
 /**
+ * MNO sites used for landbank "coverage" — align with Network Intel breadth
+ * (mno uploads + towers categorized as mno / strategy / signalHeatmap).
+ */
+function collectMnoSitesForLandbankCoverage() {
+    const getCat = (name) => localStorage.getItem(`category-${name}`) || 'towers';
+    const mnoTowers = state.towers.filter((t) => {
+        const cat = getCat(t.dataset_name);
+        return cat === 'mno' || cat === 'strategy' || cat === 'signalHeatmap';
+    });
+    mnoTowers.forEach((t) => {
+        if (!t.mno && t.sourceType && t.sourceType.startsWith('MNO_')) t.mno = t.sourceType.replace('MNO_', '');
+        if (!t.mno && [...MNOS, 'Competitor'].includes(t.sourceType)) t.mno = t.sourceType;
+        if (!t.mno && t.sourceType === 'STRATEGIC_Discovery' && !t.mno) t.mno = 'Viettel';
+        if (!t.mno) t.mno = 'Unknown';
+    });
+    const merged = [...state.mnoSites, ...mnoTowers];
+    return merged.filter((s) => MNOS.includes(normalizeMNO(s.mno || s.anchor || '')));
+}
+
+function defaultLandbankDistanceByTerrain(terrain) {
+    if (terrain === 'Dense Urban') return 0.35;
+    if (terrain === 'Urban') return 0.55;
+    if (terrain === 'Suburban') return 0.75;
+    if (terrain === 'Rural') return 1.50;
+    return 1.0;
+}
+
+/** Read per-MNO distance threshold from settings; fallback to shared defaults. */
+function getMnoDistanceThresholdKm(mno, terrain) {
+    const fallback = defaultLandbankDistanceByTerrain(terrain);
+    const row = state.settings?.scoring?.distanceThresholds?.[mno]?.[terrain];
+    if (!row || typeof row !== 'object') return fallback;
+    const raw = row.minKm ?? row.highKm ?? row.lowKm;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/** Minimum spacing between two suggested landbank pins (km), by terrain/settings. */
+function landbankMinSeparationKm(terrain) {
+    const vals = (MNOS || []).map((m) => getMnoDistanceThresholdKm(m, terrain)).filter((v) => Number.isFinite(v) && v > 0);
+    return vals.length ? Math.max(...vals) : defaultLandbankDistanceByTerrain(terrain);
+}
+
+/** Keep strongest candidate and drop nearby duplicates from neighboring sampled cells. */
+function dedupeLandbankCandidatesBySpacing(candidates) {
+    if (!candidates?.length) return [];
+    const sorted = [...candidates].sort((a, b) => (b.population || 0) - (a.population || 0));
+    const kept = [];
+    for (const c of sorted) {
+        const sepC = landbankMinSeparationKm(c.terrain);
+        const clash = kept.some((k) => {
+            const need = Math.max(sepC, landbankMinSeparationKm(k.terrain));
+            return haversineDistance(c.lat, c.lng, k.lat, k.lng) < need;
+        });
+        if (!clash) kept.push(c);
+    }
+    return kept;
+}
+
+/**
  * Compute Potential Landbank Areas (Strategic Targets):
  * - Determine geo-context terrain from 1km population thresholds.
  * - Use a terrain-specific MNO "coverage search radius" to decide which MNOs are missing.
  * - Store population metrics keyed by their respective radii so UI filtering uses "population per distance".
  *
- * Radius mapping:
+ * Radius mapping default:
  * Dense Urban => 350m
- * Urban        => 500m
- * Suburban     => 900m
+ * Urban        => 550m
+ * Suburban     => 750m
  * Rural        => 1500m
+ * If MNO-specific thresholds are configured in settings, those are used per MNO.
  */
 async function computePotentialLandbankAreas() {
     if (!state.populationGrid?.length || state.populationGrid.length === 0) {
@@ -1839,19 +1900,11 @@ async function computePotentialLandbankAreas() {
     const step = Math.max(1, Math.floor(sampledCells.length / (MAX_POINTS / 2)));
     const strideOffsets = step >= 2 ? [0, Math.floor(step / 2)] : [0];
 
-    const allMnoSites = state.mnoSites.filter((s) => MNOS.includes(normalizeMNO(s.mno)));
+    const allMnoSites = collectMnoSitesForLandbankCoverage();
     const siteBuckets = buildMnoSiteGridBuckets(allMnoSites);
     await new Promise((r) => setTimeout(r, 0));
 
     let landbankIter = 0;
-
-    const getSearchRadiusKmByTerrain = (terrain) => {
-        if (terrain === 'Dense Urban') return 0.35;
-        if (terrain === 'Urban') return 0.50;
-        if (terrain === 'Suburban') return 0.90;
-        if (terrain === 'Rural') return 1.50;
-        return 1.0;
-    };
 
     // Closest available population buckets to the MNO search radius.
     const getPopulationForFilterByTerrain = (terrain, popInfo) => {
@@ -1876,14 +1929,17 @@ async function computePotentialLandbankAreas() {
 
             // Use 1km geo-context thresholds (Dense>=9000, Urban>=5000, Suburban>=3000).
             const terrain = terrainFromPopulation(pop1km, state.settings);
-            const searchRadiusKm = getSearchRadiusKmByTerrain(terrain);
+            const searchRadiusKmByMno = Object.fromEntries(
+                (MNOS || []).map((m) => [m, getMnoDistanceThresholdKm(m, terrain)])
+            );
 
             const hasMno = Object.fromEntries(MNOS.map((m) => [m, false]));
             for (const site of sitesInNeighborBuckets(lat, lng, siteBuckets, 2)) {
                 const d = haversineDistance(lat, lng, site.lat, site.lng);
-                if (d <= searchRadiusKm) {
-                    const nm = normalizeMNO(site.mno);
-                    if (hasMno[nm] !== undefined) hasMno[nm] = true;
+                const nm = normalizeMNO(site.mno || site.anchor || '');
+                if (hasMno[nm] !== undefined) {
+                    const th = searchRadiusKmByMno[nm] ?? defaultLandbankDistanceByTerrain(terrain);
+                    if (d <= th) hasMno[nm] = true;
                 }
             }
 
@@ -1896,8 +1952,9 @@ async function computePotentialLandbankAreas() {
                     lng,
                     mnMissing,
                     terrain,
-                    searchRadiusKm,
-                    searchRadiusM: Math.round(searchRadiusKm * 1000),
+                    searchRadiusKm: Math.max(...Object.values(searchRadiusKmByMno)),
+                    searchRadiusM: Math.round(Math.max(...Object.values(searchRadiusKmByMno)) * 1000),
+                    searchRadiusKmByMno,
 
                     // This is what the UI minPop filter uses: population "at the right distance"
                     population: getPopulationForFilterByTerrain(terrain, popInfo),
@@ -1910,8 +1967,9 @@ async function computePotentialLandbankAreas() {
         }
     }
 
-    state.potentialLandbankAreas = results;
-    console.log(`✅ Potential Landbank Areas computed (terrain radius): ${results.length}`);
+    const deduped = dedupeLandbankCandidatesBySpacing(results);
+    state.potentialLandbankAreas = deduped;
+    console.log(`✅ Potential Landbank Areas computed (terrain/settings): ${deduped.length}`);
 }
 
 // ── Network Intel helpers ─────────────────────────────────────────────
