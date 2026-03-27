@@ -343,8 +343,9 @@ export function createPotentialLandbankLayer(data, opts = {}) {
         getPosition: d => [d.lng, d.lat],
         getRadius: d => d.mnMissing === 3 ? 120 : 90,
         radiusUnits: 'meters',
-        getFillColor: d => d.mnMissing === 3 ? [128, 128, 128, 200] : [255, 255, 255, 220],
-        getLineColor: d => d.mnMissing === 3 ? [80, 80, 80, 255] : [200, 200, 200, 255],
+        // Priority gap colors: 3-missing=orange (urgent), 2-missing=yellow (secondary).
+        getFillColor: d => d.mnMissing === 3 ? [255, 140, 0, 220] : [255, 214, 0, 215],
+        getLineColor: d => d.mnMissing === 3 ? [255, 94, 0, 255] : [214, 158, 0, 255],
         stroked: true,
         filled: true,
         lineWidthMinPixels: 1,

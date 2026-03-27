@@ -731,7 +731,9 @@ export function renderFilters(container, { datasets, activeDatasets, onFilterCha
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const name = e.currentTarget.dataset.name || e.target.closest('.delete-ds')?.dataset.name;
-      if (name && onDatasetDelete) onDatasetDelete(name);
+      if (name && onDatasetDelete && confirm(`Delete database "${name}"?\n\nThis action cannot be undone.`)) {
+        onDatasetDelete(name);
+      }
     });
   });
 

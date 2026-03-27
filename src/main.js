@@ -2289,6 +2289,25 @@ function hideComparisonSlider() {
     clearPolygonAreaSummary(document.getElementById('polygon-area-summary'));
     resyncMapToDeckAfterCompare();
     if (state.filters.layers.networkIntel) refreshIntelPanel();
+    // Defensive recovery: compare-close can rarely leave in-memory rows empty.
+    maybeRecoverVisibleDataAfterCompareClose();
+}
+
+function maybeRecoverVisibleDataAfterCompareClose() {
+    const hasDatasets = Array.isArray(state.datasets) && state.datasets.length > 0;
+    const hasActive = state.activeDatasets instanceof Set && state.activeDatasets.size > 0;
+    const hasLoadedRows = (state.towers?.length || 0) + (state.mnoSites?.length || 0) > 0;
+    if (!hasDatasets || !hasActive || hasLoadedRows) return;
+    setTimeout(async () => {
+        try {
+            await loadVisibleDatasets();
+            processDataSync();
+            updateDashboard();
+            updateLayers();
+        } catch (e) {
+            console.warn('compare-close data recovery failed', e);
+        }
+    }, 0);
 }
 
 /** Same MNO-site union as rebuildGeohashGrid (for polygon KPI stats). */

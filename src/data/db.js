@@ -13,9 +13,9 @@ function getUserScopedDbName() {
     return uid ? `${DB_NAME}__user_${uid}` : DB_NAME;
 }
 
-export function openDB() {
+function openDbByName(name) {
     return new Promise((resolve, reject) => {
-        const request = indexedDB.open(getUserScopedDbName(), DB_VERSION);
+        const request = indexedDB.open(name, DB_VERSION);
 
         request.onupgradeneeded = (e) => {
             const db = e.target.result;
@@ -28,6 +28,10 @@ export function openDB() {
         request.onsuccess = (e) => resolve(e.target.result);
         request.onerror = (e) => reject(e.target.error);
     });
+}
+
+export function openDB() {
+    return openDbByName(getUserScopedDbName());
 }
 
 /**
@@ -50,13 +54,29 @@ export async function saveToDB(storeName, data, key = 'current_dataset') {
  */
 export async function loadFromDB(storeName, key = 'current_dataset') {
     const db = await openDB();
-    return new Promise((resolve, reject) => {
+    const userVal = await new Promise((resolve, reject) => {
         const transaction = db.transaction([storeName], 'readonly');
         const store = transaction.objectStore(storeName);
         const request = store.get(key);
         request.onsuccess = (e) => resolve(e.target.result || null);
         request.onerror = (e) => reject(e.target.error);
     });
+    if (userVal != null) return userVal;
+
+    const scoped = getUserScopedDbName();
+    if (scoped === DB_NAME) return null;
+    try {
+        const legacy = await openDbByName(DB_NAME);
+        return await new Promise((resolve, reject) => {
+            const transaction = legacy.transaction([storeName], 'readonly');
+            const store = transaction.objectStore(storeName);
+            const request = store.get(key);
+            request.onsuccess = (e) => resolve(e.target.result || null);
+            request.onerror = (e) => reject(e.target.error);
+        });
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -74,14 +94,21 @@ export async function listDBKeys(storeName) {
 }
 
 export async function deleteFromDB(storeName, key) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction([storeName], 'readwrite');
-        const store = transaction.objectStore(storeName);
-        store.delete(key);
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = (e) => reject(e.target.error);
-    });
+    const deleteInDb = async (dbName) => {
+        const db = await openDbByName(dbName);
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([storeName], 'readwrite');
+            const store = transaction.objectStore(storeName);
+            store.delete(key);
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = (e) => reject(e.target.error);
+        });
+    };
+    const scoped = getUserScopedDbName();
+    await deleteInDb(scoped);
+    if (scoped !== DB_NAME) {
+        try { await deleteInDb(DB_NAME); } catch { /* ignore */ }
+    }
 }
 
 export async function clearDB() {
