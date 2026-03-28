@@ -62,10 +62,10 @@ const LAYER_TOGGLE_DEFAULTS = {
   mno: true,
   heatmap: true,
   population: false,
-  strategy: true,
+  strategy: false,
   searchRings: true,
   networkIntel: false,
-  potentialLandbankAreas: true
+  potentialLandbankAreas: false
 };
 
 function layerCheckedAttr(ls, key) {
@@ -658,7 +658,18 @@ export function renderFilters(container, { datasets, activeDatasets, onFilterCha
     datasetNames: groups.signalHeatmap,
     extraChildSelector: '#children-signalHeatmap .raster-cb'
   });
-  configureParentGroup({ parentId: '#layer-strategy', childSelector: '#children-strategy .ds-check', datasetNames: groups.strategy, extraChildSelector: '#children-strategy #layer-potential-landbank' });
+  configureParentGroup({ parentId: '#layer-strategy', childSelector: '#children-strategy .ds-check', datasetNames: groups.strategy });
+  const syncStrategyLandbankUi = () => {
+    const st = container.querySelector('#layer-strategy');
+    const lb = container.querySelector('#layer-potential-landbank');
+    if (!st || !lb) return;
+    lb.disabled = !st.checked;
+    if (!st.checked) lb.checked = false;
+    const row = lb.closest('.dataset-item');
+    if (row) row.style.opacity = st.checked ? '1' : '0.45';
+  };
+  container.querySelector('#layer-strategy')?.addEventListener('change', syncStrategyLandbankUi);
+  syncStrategyLandbankUi();
   configureParentGroup({ parentId: '#layer-search-rings', childSelector: '#children-searchRings .ds-check', datasetNames: groups.searchRings });
   container.querySelector('#layer-potential-landbank')?.addEventListener('change', (e) => {
     if (e.target.checked) {

@@ -43,6 +43,7 @@ import { createGeohashLayer, buildGeohashTooltip } from './layers/geohash-layer.
 import { renderNetworkIntelPanel, computeSummary } from './ui/network-intel-panel.js';
 import { createComparisonSlider } from './ui/comparison-slider.js';
 import { encode as ghEncode, toPolygon as ghToPolygon, decode as ghDecode, neighbors as ghNeighbors } from './engine/geohash.js';
+
 import { generateCrowdsourcedData } from './engine/data-generator.js';
 import { syncMultipleSources } from './engine/sync-engine.js';
 import {
@@ -283,7 +284,7 @@ let state = {
         mnoFilterValue: 'All',     // MNO Sites: selected value for that column
         landbankMinPopulation: 2000, // Potential landbank: minimum population within cell
         landbankUrbanOnly: true,     // Potential landbank: restrict to Urban / Dense Urban
-        layers: { towers: true, mno: true, heatmap: false, population: false, strategy: true, searchRings: true, networkIntel: false, potentialLandbankAreas: true }
+        layers: { towers: true, mno: true, heatmap: false, population: false, strategy: false, searchRings: true, networkIntel: false, potentialLandbankAreas: false }
     },
     selectedTower: null,
     highlightId: null,
@@ -459,6 +460,35 @@ function getCompareLeftGeographicBounds() {
     const [w, s, e, n] = flat;
     if (![w, s, e, n].every(Number.isFinite)) return null;
     return [[w, s], [e, n]];
+}
+
+/** [minLng, minLat, maxLng, maxLat] with padding, or null — landbank samples this viewport first. */
+function getLandbankViewportBoundsFlat() {
+    const b = getCompareLeftGeographicBounds();
+    if (!b) return null;
+    const [[w, s], [e, n]] = b;
+    const padLng = (e - w) * 0.05;
+    const padLat = (n - s) * 0.05;
+    return [w - padLng, s - padLat, e + padLng, n + padLat];
+}
+
+/**
+ * Order population grid cells so the current map viewport is processed first during landbank sampling
+ * (stride walks the array — earlier cells get priority).
+ */
+function orderPopulationGridForLandbankViewport(sampledCells) {
+    const flat = getLandbankViewportBoundsFlat();
+    if (!flat || sampledCells.length < 200) return sampledCells;
+    const [minLng, minLat, maxLng, maxLat] = flat;
+    const inView = [];
+    const out = [];
+    for (const cell of sampledCells) {
+        const lat = cell.lat;
+        const lng = cell.lng;
+        if (lng >= minLng && lng <= maxLng && lat >= minLat && lat <= maxLat) inView.push(cell);
+        else out.push(cell);
+    }
+    return inView.length ? [...inView, ...out] : sampledCells;
 }
 
 /** @param {object|number[]} c MapLibre LngLat or [lng,lat] */
@@ -997,6 +1027,8 @@ async function init() {
             }
         },
         onFilterChange: (newFilters) => {
+            const prevLb = state.filters?.layers?.potentialLandbankAreas;
+            const prevStrategy = state.filters?.layers?.strategy;
             state.filters = newFilters;
             if (map && map.getLayer('google-satellite-layer')) {
                 const vis = newFilters.satellite ? 'visible' : 'none';
@@ -1033,6 +1065,11 @@ async function init() {
                     hideComparisonSlider();
                     clearPolygonCompareArea();
                 }
+            }
+            const wantLandbank =
+                newFilters.layers?.potentialLandbankAreas && newFilters.layers?.strategy;
+            if (wantLandbank && (!prevLb || !prevStrategy)) {
+                void scheduleLandbankComputeIfNeeded();
             }
             updateLayers();
             updateDashboard();
@@ -1487,6 +1524,10 @@ async function loadVisibleDatasets() {
 
 /** In-flight population grid build — concurrent callers await the same promise (avoids empty landbank race). */
 let populationGridLoadPromise = null;
+/** In-flight landbank compute — avoid stacking duplicate runs when toggling layers. */
+let landbankComputePromise = null;
+/** Avoid repeating the same "no tower data" toast in one session. */
+let __landbankNoSitesToastShown = false;
 
 /**
  * Lazy-load population grid for map tint: WorldPop 1 km GeoTIFF (subsampled blocks) or synthetic fallback.
@@ -1513,27 +1554,36 @@ async function loadPopulationGrid() {
         // WorldPop: single 1 km pixel = 1 km²; subsampled blocks use c.blockAreaKm2 from population.js
         const defaultWorldPopArea = 1.0;
 
-        state.populationGrid = raw.map((c) => {
-            const hash = ghEncode(c.lat, c.lng, 7);
-            const popRaw = Math.max(0, Number(c.population) || 0);
-            const pop = Math.round(popRaw);
-            const areaKm2ForDensity = isWorldPop
-                ? (typeof c.blockAreaKm2 === 'number' && c.blockAreaKm2 > 0 ? c.blockAreaKm2 : defaultWorldPopArea)
-                : 4.0; // ~2° synthetic step ≈ 4 km²
-            const densityPerKm2 = popRaw / areaKm2ForDensity;
-            let density = Math.max(0, Math.round(densityPerKm2));
-            if (popRaw > 1e-6 && density === 0) density = 1; // ensure visible tint for tiny counts
+        // Chunk + yield: mapping 100k+ cells synchronously blocks the main thread ("Page Unresponsive").
+        const POP_GRID_CHUNK = 6000;
+        const mapped = [];
+        for (let i = 0; i < raw.length; i += POP_GRID_CHUNK) {
+            if (i > 0) await new Promise((r) => setTimeout(r, 0));
+            const end = Math.min(i + POP_GRID_CHUNK, raw.length);
+            for (let j = i; j < end; j++) {
+                const c = raw[j];
+                const hash = ghEncode(c.lat, c.lng, 7);
+                const popRaw = Math.max(0, Number(c.population) || 0);
+                const pop = Math.round(popRaw);
+                const areaKm2ForDensity = isWorldPop
+                    ? (typeof c.blockAreaKm2 === 'number' && c.blockAreaKm2 > 0 ? c.blockAreaKm2 : defaultWorldPopArea)
+                    : 4.0; // ~2° synthetic step ≈ 4 km²
+                const densityPerKm2 = popRaw / areaKm2ForDensity;
+                let density = Math.max(0, Math.round(densityPerKm2));
+                if (popRaw > 1e-6 && density === 0) density = 1; // ensure visible tint for tiny counts
 
-            return {
-                lat: c.lat,
-                lng: c.lng,
-                population: pop,
-                populationRaw: popRaw,
-                density,
-                hash,
-                polygon: c.polygon || ghToPolygon(hash)
-            };
-        }).filter((c) => c.polygon && (c.populationRaw > 1e-6));
+                mapped.push({
+                    lat: c.lat,
+                    lng: c.lng,
+                    population: pop,
+                    populationRaw: popRaw,
+                    density,
+                    hash,
+                    polygon: c.polygon || ghToPolygon(hash)
+                });
+            }
+        }
+        state.populationGrid = mapped.filter((c) => c.polygon && (c.populationRaw > 1e-6));
 
         if (state.populationGrid.length === 0) {
             console.warn(
@@ -1706,12 +1756,11 @@ function _processDataSyncImpl() {
         state.mnoSites.forEach(assignCaap);
         console.log('✅ CAAP distances computed');
 
-        // 2. Potential Landbank Areas (high pop, 2–3 MNO missing).
+        // 2. Potential Landbank Areas — lazy: only when user enables "Potential Landbank Areas" (see scheduleLandbankComputeIfNeeded).
         try {
-            await computePotentialLandbankAreas();
-            console.log('✅ Potential Landbank Areas computed');
+            void scheduleLandbankComputeIfNeeded();
         } catch (err) {
-            console.warn('⚠️ Potential Landbank Areas computation failed:', err);
+            console.warn('⚠️ Potential Landbank Areas schedule failed:', err);
         }
 
         // 3. Geohash grid (for Network Intel heatmap)
@@ -1764,6 +1813,9 @@ function _processDataSyncImpl() {
  */
 function batchEnrichAllSites() {
     if (!state.populationGrid || state.populationGrid.length === 0) return;
+    if ((!state.towers || state.towers.length === 0) && (!state.mnoSites || state.mnoSites.length === 0)) {
+        return;
+    }
 
     console.log('🌎 Batch enriching GeoContext for all sites (Accurate Haversine)...');
 
@@ -2003,8 +2055,52 @@ function dedupeLandbankCandidatesBySpacing(candidates) {
  * Rural        => 1500m
  * If MNO-specific thresholds are configured in settings, those are used per MNO.
  */
+async function scheduleLandbankComputeIfNeeded() {
+    syncLayerTogglesFromDom();
+    if (!state.filters.layers.potentialLandbankAreas || !state.filters.layers.strategy) return;
+    if (landbankComputePromise) return landbankComputePromise;
+
+    const mnoForLb = collectMnoSitesForLandbankCoverage();
+    const ourForLb = collectOurSitesForLandbank();
+    if (mnoForLb.length === 0 && ourForLb.length === 0) {
+        state.potentialLandbankAreas = [];
+        if (!__landbankNoSitesToastShown) {
+            __landbankNoSitesToastShown = true;
+            showToast(
+                'Potential Landbank needs tower data: sync MNO/cell sites or upload Our Assets. Strategic discovery pins only appear after sync generates STRATEGIC_Discovery points.',
+                'warning'
+            );
+        }
+        updateLayers();
+        updateDashboard();
+        return;
+    }
+    __landbankNoSitesToastShown = false;
+
+    landbankComputePromise = (async () => {
+        try {
+            await loadPopulationGrid();
+            await computePotentialLandbankAreas();
+            updateLayers();
+            updateDashboard();
+        } catch (e) {
+            console.warn('[landbank]', e);
+        } finally {
+            landbankComputePromise = null;
+        }
+    })();
+    return landbankComputePromise;
+}
+
 async function computePotentialLandbankAreas() {
     if (!state.populationGrid?.length || state.populationGrid.length === 0) {
+        state.potentialLandbankAreas = [];
+        return;
+    }
+
+    const mnoForLb = collectMnoSitesForLandbankCoverage();
+    const ourForLb = collectOurSitesForLandbank();
+    if (mnoForLb.length === 0 && ourForLb.length === 0) {
         state.potentialLandbankAreas = [];
         return;
     }
@@ -2012,13 +2108,13 @@ async function computePotentialLandbankAreas() {
     // National sample cap; MNO proximity uses spatial buckets (not a full scan of every site per sample).
     const MAX_POINTS = 18000;
     const results = [];
-    const sampledCells = state.populationGrid;
+    let sampledCells = orderPopulationGridForLandbankViewport(state.populationGrid);
     const step = Math.max(1, Math.floor(sampledCells.length / (MAX_POINTS / 2)));
     const strideOffsets = step >= 2 ? [0, Math.floor(step / 2)] : [0];
 
-    const allMnoSites = collectMnoSitesForLandbankCoverage();
+    const allMnoSites = mnoForLb;
     const siteBuckets = buildMnoSiteGridBuckets(allMnoSites);
-    const ourSiteBuckets = buildMnoSiteGridBuckets(collectOurSitesForLandbank());
+    const ourSiteBuckets = buildMnoSiteGridBuckets(ourForLb);
     await new Promise((r) => setTimeout(r, 0));
 
     let landbankIter = 0;
