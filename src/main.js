@@ -283,21 +283,14 @@ let state = {
         mnoFilterColumn: '',       // MNO Sites: user-chosen column
         mnoFilterValue: 'All',     // MNO Sites: selected value for that column
         landbankMinPopulation: 2000, // Potential landbank: minimum population within cell
-        landbankUrbanOnly: true,     // Potential landbank: restrict to Urban / Dense Urban
+        landbankUrbanOnly: false,    // If true, hides rural gaps (off by default)
         layers: { towers: true, mno: true, heatmap: false, population: false, strategy: false, searchRings: true, networkIntel: false, potentialLandbankAreas: false }
     },
     selectedTower: null,
     highlightId: null,
     searchRingsGeoJSON: null,
-    rasters: {
-        globeRSRP: {
-            visible: false,
-            isLoading: false,
-            data: [],
-            url: '/rasters/globe_rsrp_davao.json',
-            bounds: { west: 125.59019295037956, south: 7.074009155280282, east: 125.63349453271599, north: 7.100583718688269 }
-        }
-    },
+    /** User-added RSRP/signal rasters only (no bundled sample — avoids heavy default downloads). */
+    rasters: {},
     isPegmanMode: false,
     // Potential Landbank Areas: high-pop areas with 2–3 MNO missing (computed from populationGrid + mnoSites)
     potentialLandbankAreas: [],
@@ -1528,6 +1521,20 @@ let populationGridLoadPromise = null;
 let landbankComputePromise = null;
 /** Avoid repeating the same "no tower data" toast in one session. */
 let __landbankNoSitesToastShown = false;
+let __landbankNoMnoDataToastShown = false;
+
+/** Inline sidebar hint while landbank samples run (reduces “frozen page” worry). */
+function setLandbankComputeUi(busy, message = '') {
+    const el = document.getElementById('landbank-compute-status');
+    if (!el) return;
+    if (busy) {
+        el.style.display = 'block';
+        el.textContent = message || 'Calculating potential landbank site locations… Please wait.';
+    } else {
+        el.style.display = 'none';
+        el.textContent = '';
+    }
+}
 
 /**
  * Lazy-load population grid for map tint: WorldPop 1 km GeoTIFF (subsampled blocks) or synthetic fallback.
@@ -2002,11 +2009,12 @@ function collectOurSitesForLandbank() {
     });
 }
 
+/** Fallback km when Settings row is missing — matches colocation defaults. */
 function defaultLandbankDistanceByTerrain(terrain) {
     if (terrain === 'Dense Urban') return 0.35;
-    if (terrain === 'Urban') return 0.55;
+    if (terrain === 'Urban') return 0.5;
     if (terrain === 'Suburban') return 0.75;
-    if (terrain === 'Rural') return 1.50;
+    if (terrain === 'Rural') return 1.5;
     return 1.0;
 }
 
@@ -2026,10 +2034,15 @@ function landbankMinSeparationKm(terrain) {
     return vals.length ? Math.max(...vals) : defaultLandbankDistanceByTerrain(terrain);
 }
 
-/** Keep strongest candidate and drop nearby duplicates from neighboring sampled cells. */
+/** Greedy dedupe: prefer higher mnMissing (true gaps) then higher population. */
 function dedupeLandbankCandidatesBySpacing(candidates) {
     if (!candidates?.length) return [];
-    const sorted = [...candidates].sort((a, b) => (b.population || 0) - (a.population || 0));
+    const sorted = [...candidates].sort((a, b) => {
+        const ma = Number(a.mnMissing) || 0;
+        const mb = Number(b.mnMissing) || 0;
+        if (mb !== ma) return mb - ma;
+        return (b.population || 0) - (a.population || 0);
+    });
     const kept = [];
     for (const c of sorted) {
         const sepC = landbankMinSeparationKm(c.terrain);
@@ -2044,16 +2057,9 @@ function dedupeLandbankCandidatesBySpacing(candidates) {
 
 /**
  * Compute Potential Landbank Areas (Strategic Targets):
- * - Determine geo-context terrain from 1km population thresholds.
- * - Use a terrain-specific MNO "coverage search radius" to decide which MNOs are missing.
- * - Store population metrics keyed by their respective radii so UI filtering uses "population per distance".
- *
- * Radius mapping default:
- * Dense Urban => 350m
- * Urban        => 550m
- * Suburban     => 750m
- * Rural        => 1500m
- * If MNO-specific thresholds are configured in settings, those are used per MNO.
+ * - Terrain from 1km population vs Settings thresholds.
+ * - Per-MNO “present” = nearest site within Settings → min distance (km) for that terrain.
+ * - Merge anchor (≥1 MNO in range) and relaxed (0 MNO) gap candidates before dedupe.
  */
 async function scheduleLandbankComputeIfNeeded() {
     syncLayerTogglesFromDom();
@@ -2076,16 +2082,40 @@ async function scheduleLandbankComputeIfNeeded() {
         return;
     }
     __landbankNoSitesToastShown = false;
+    if (mnoForLb.length === 0) {
+        state.potentialLandbankAreas = [];
+        if (!__landbankNoMnoDataToastShown) {
+            __landbankNoMnoDataToastShown = true;
+            showToast(
+                'Potential Landbank needs MNO site data (sync cell sites or mark towers as MNO / Signal Heatmap). Otherwise gaps cannot be scored.',
+                'warning'
+            );
+        }
+        updateLayers();
+        updateDashboard();
+        return;
+    }
+    __landbankNoMnoDataToastShown = false;
 
     landbankComputePromise = (async () => {
         try {
+            showToast(
+                'Calculating potential landbank… Sampling site locations. This may take 30–90 seconds — please wait.',
+                'info',
+                14000
+            );
+            setLandbankComputeUi(true);
             await loadPopulationGrid();
             await computePotentialLandbankAreas();
+            const n = state.potentialLandbankAreas?.length ?? 0;
+            showToast(`Landbank ready: ${n} candidate location${n === 1 ? '' : 's'}.`, 'success', 6000);
             updateLayers();
             updateDashboard();
         } catch (e) {
             console.warn('[landbank]', e);
+            showToast('Landbank calculation failed — see console.', 'warning', 8000);
         } finally {
+            setLandbankComputeUi(false);
             landbankComputePromise = null;
         }
     })();
@@ -2104,10 +2134,15 @@ async function computePotentialLandbankAreas() {
         state.potentialLandbankAreas = [];
         return;
     }
+    if (mnoForLb.length === 0) {
+        state.potentialLandbankAreas = [];
+        return;
+    }
 
     // National sample cap; MNO proximity uses spatial buckets (not a full scan of every site per sample).
     const MAX_POINTS = 18000;
     const results = [];
+    const relaxedResults = [];
     let sampledCells = orderPopulationGridForLandbankViewport(state.populationGrid);
     const step = Math.max(1, Math.floor(sampledCells.length / (MAX_POINTS / 2)));
     const strideOffsets = step >= 2 ? [0, Math.floor(step / 2)] : [0];
@@ -2129,9 +2164,10 @@ async function computePotentialLandbankAreas() {
     };
 
     for (const offset of strideOffsets) {
+        await new Promise((r) => setTimeout(r, 0));
         for (let i = offset; i < sampledCells.length; i += step) {
             landbankIter++;
-            if (landbankIter % 120 === 0) await new Promise((r) => setTimeout(r, 0));
+            if (landbankIter % 40 === 0) await new Promise((r) => setTimeout(r, 0));
 
             const cell = sampledCells[i];
             const lat = cell.lat, lng = cell.lng;
@@ -2165,7 +2201,7 @@ async function computePotentialLandbankAreas() {
             });
 
             if (mnMissing >= 2 && !nearOurSite) {
-                results.push({
+                const candidate = {
                     lat,
                     lng,
                     mnMissing,
@@ -2181,17 +2217,18 @@ async function computePotentialLandbankAreas() {
                     population_500m: popInfo.radius_500m || 0,
                     population_1km: pop1km,
                     population_1_5km: popInfo.radius_1_5km || 0
-                });
+                };
+                if (hasAnchorTenant) results.push(candidate);
+                else relaxedResults.push(candidate);
             }
         }
     }
 
-    const anchorBacked = results.filter((r) => r.hasAnchorTenant);
-    const baseCandidates = anchorBacked.length > 0 ? anchorBacked : results;
-    const deduped = dedupeLandbankCandidatesBySpacing(baseCandidates);
+    const base = [...results, ...relaxedResults];
+    const deduped = dedupeLandbankCandidatesBySpacing(base);
     state.potentialLandbankAreas = deduped;
-    if (anchorBacked.length === 0 && results.length > 0) {
-        console.log(`ℹ️ Landbank fallback: no anchor-backed candidates in this scope; using non-anchor gaps (${results.length})`);
+    if (deduped.length < base.length) {
+        console.log(`📍 Landbank spacing: ${base.length} → ${deduped.length}`);
     }
     console.log(`✅ Potential Landbank Areas computed (terrain/settings): ${deduped.length}`);
 }
@@ -3121,6 +3158,18 @@ function initMap() {
                 }
             };
         }
+        if (layer.id && String(layer.id).startsWith('potential-landbank-') && object && object.mnMissing != null) {
+            const severe = object.mnMissing >= 3;
+            const label = severe ? '3+ operators missing (bronze disk)' : '2 operators missing (white dot)';
+            return {
+                html: `<div style="padding:10px;background:rgba(13,17,23,0.96);color:#e2e8f0;border-radius:8px;font-size:11px;border:1px solid rgba(255,255,255,0.12);max-width:240px;font-family:Inter,sans-serif;">
+                    <div style="font-weight:600;color:#94a3b8;margin-bottom:6px;">Potential landbank</div>
+                    <div style="color:#cbd5e1;">${label}</div>
+                    <div style="margin-top:8px;font-size:10px;color:#64748b;">Terrain: ${object.terrain || '—'} · MNOs missing: <strong style="color:#e2e8f0;">${object.mnMissing}</strong></div>
+                </div>`,
+                style: { background: 'none', border: 'none', padding: '0' }
+            };
+        }
         return null;
     }
 
@@ -3367,8 +3416,8 @@ function initMap() {
                 return;
             }
 
-            // 2) Landbank candidate (Potential Landbank Areas layer)
-            if (info.layer && info.layer.id && info.layer.id.startsWith('potential-landbank-areas')) {
+            // 2) Landbank candidate (Potential Landbank Areas — ScatterplotLayer ids start with potential-landbank-)
+            if (info.layer && info.layer.id && String(info.layer.id).startsWith('potential-landbank-')) {
                 const p = info.object;
                 const fakeId = `LB-${p.lat.toFixed(4)}-${p.lng.toFixed(4)}`;
                 const pop1km = p.population_1km ?? p.population ?? 0;
@@ -3823,12 +3872,12 @@ function _updateLayersImpl() {
             urbanOnly,
             afterFilter: filteredLandbank.length
         });
-        const landbankLayer = createPotentialLandbankLayer(filteredLandbank);
-        if (landbankLayer) {
-            layers.push(landbankLayer);
+        const landbankLayers = createPotentialLandbankLayer(filteredLandbank);
+        if (landbankLayers.length) {
+            layers.push(...landbankLayers);
             if (ni.comparing) {
-                const rightLayer = createPotentialLandbankLayer(filteredLandbank, { idSuffix: '-right' });
-                if (rightLayer) layersRight.push(rightLayer);
+                const landbankRight = createPotentialLandbankLayer(filteredLandbank, { idSuffix: '-right' });
+                if (landbankRight.length) layersRight.push(...landbankRight);
             }
         }
     }
@@ -4017,7 +4066,7 @@ function updateDashboard() {
 /**
  * Show a floating toast notification
  */
-function showToast(message, type = 'info') {
+function showToast(message, type = 'info', durationMs = 4000) {
     const container = document.querySelector('.toast-container');
     if (!container) return;
 
@@ -4029,11 +4078,11 @@ function showToast(message, type = 'info') {
 
     container.appendChild(toast);
 
-    // Auto-remove after 4 seconds
+    if (durationMs <= 0) return;
     setTimeout(() => {
         toast.classList.add('hiding');
         setTimeout(() => toast.remove(), 300);
-    }, 4000);
+    }, durationMs);
 }
 
 
@@ -4131,7 +4180,7 @@ async function loadRasterData(rasterKey) {
         const res = await fetch(raster.url);
         const data = await res.json();
         raster.data = data;
-        showToast(`Loaded RSRP raster data.`, 'success');
+        showToast('Loaded signal raster data.', 'success');
         updateLayers();
     } catch (err) {
         console.error('Raster data load failed:', err);

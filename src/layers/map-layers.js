@@ -328,32 +328,58 @@ export function createPopulationRings(tower) {
     });
 }
 
+/** Shared geometry + deck styling for both landbank tiers (only fill/stroke colors differ). */
+const LAND_BANK_SCATTER_STYLE = {
+    getRadius: () => 150,
+    radiusUnits: 'meters',
+    stroked: true,
+    filled: true,
+    lineWidthMinPixels: 1,
+    radiusMinPixels: 10,
+    radiusMaxPixels: 36,
+    pickable: true,
+    parameters: { depthWrite: false, depthTest: false }
+};
+
 /**
- * Potential Landbank Areas: high-pop (>2000/1km) where 2 or 3 MNO are missing.
- * @param {Array} data - [{ lat, lng, mnMissing (2|3), population }]
+ * Potential Landbank Areas: high-pop where ≥2 MNOs are missing at the sample cell.
+ * @param {Array} data - [{ lat, lng, mnMissing (2…4), population }]
  * @param {Object} opts - { idSuffix: '' } for comparison view
- * @returns {ScatterplotLayer}
+ * @returns {ScatterplotLayer[]} 0–2 layers: bronze disks (≥3 MNO missing), then white dots (exactly 2 missing, drawn on top).
  */
 export function createPotentialLandbankLayer(data, opts = {}) {
-    if (!data || data.length === 0) return null;
+    if (!data || data.length === 0) return [];
     const idSuffix = opts.idSuffix || '';
-    return new ScatterplotLayer({
-        id: `potential-landbank-areas${idSuffix}`,
-        data,
-        getPosition: d => [d.lng, d.lat],
-        getRadius: d => d.mnMissing === 3 ? 120 : 90,
-        radiusUnits: 'meters',
-        // Priority gap colors: 3-missing=orange (urgent), 2-missing=yellow (secondary).
-        getFillColor: d => d.mnMissing === 3 ? [255, 140, 0, 220] : [255, 214, 0, 215],
-        getLineColor: d => d.mnMissing === 3 ? [255, 94, 0, 255] : [214, 158, 0, 255],
-        stroked: true,
-        filled: true,
-        lineWidthMinPixels: 1,
-        radiusMinPixels: 6,
-        radiusMaxPixels: 24,
-        pickable: true,
-        parameters: { depthWrite: false }
-    });
+    const mnVal = (d) => Number(d.mnMissing);
+    const severe = data.filter((d) => mnVal(d) >= 3);
+    const twoGap = data.filter((d) => mnVal(d) === 2);
+    const layers = [];
+
+    if (severe.length > 0) {
+        layers.push(
+            new ScatterplotLayer({
+                id: `potential-landbank-3mno${idSuffix}`,
+                data: severe,
+                getPosition: (d) => [d.lng, d.lat],
+                ...LAND_BANK_SCATTER_STYLE,
+                getFillColor: [168, 112, 28, 245],
+                getLineColor: [92, 58, 12, 255]
+            })
+        );
+    }
+    if (twoGap.length > 0) {
+        layers.push(
+            new ScatterplotLayer({
+                id: `potential-landbank-2mno${idSuffix}`,
+                data: twoGap,
+                getPosition: (d) => [d.lng, d.lat],
+                ...LAND_BANK_SCATTER_STYLE,
+                getFillColor: [255, 255, 255, 255],
+                getLineColor: [55, 55, 62, 255]
+            })
+        );
+    }
+    return layers;
 }
 
 /**

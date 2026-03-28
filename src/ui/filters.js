@@ -102,7 +102,7 @@ function renderDatasetItem(d, activeDatasets) {
     </div>`;
 }
 
-const RASTER_LABELS = { globeRSRP: 'RSRP raster (sample)' };
+const RASTER_LABELS = {};
 
 const SCORE_TERRAINS = ['Dense Urban', 'Urban', 'Suburban', 'Rural'];
 const SCORE_MNOS = MNOS;
@@ -126,7 +126,7 @@ function buildDistanceThresholdInputs(settings) {
       const safeMno = escapeHtml(mno);
       return `<div style="display:grid;grid-template-columns:1fr 64px;gap:6px;align-items:center;font-size:9px;margin-bottom:2px;">
         <span style="color:#94a3b8;">${safeTerr} <span style="color:#64748b;font-size:8px;">≥ km</span></span>
-        <input type="number" step="0.05" min="0.05" class="setting-dist-min" data-mno="${safeMno}" data-terrain="${safeTerr}" value="${minKm}" title="Minimum distance to nearest MNO site (km) for colocation potential" style="font-size:8px;padding:2px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
+        <input type="number" step="0.05" min="0.05" class="setting-dist-min" data-mno="${safeMno}" data-terrain="${safeTerr}" value="${minKm}" title="If nearest site is within this distance (km) for this terrain, that MNO counts as present — colocation scoring and Potential Landbank gaps use the same values." style="font-size:8px;padding:2px;background:#0b1121;color:#e2e8f0;border:1px solid #334155;border-radius:4px;" />
       </div>`;
     }).join('');
     return `<div style="margin-top:6px;padding:8px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid #334155;">
@@ -136,7 +136,7 @@ function buildDistanceThresholdInputs(settings) {
   }).join('');
 }
 
-export function renderFilters(container, { datasets, activeDatasets, onFilterChange, onFileUpload, onKMLUpload, onExport, onClearData, onSearch, onMeasureToggle, onSyncOSM, onSyncMNO, onDatasetToggle, onDatasetDelete, onParentDatasetToggle = null, rasterLayers = {}, onDeleteRaster, towerFilterColumn = '', towerFilterValue = 'All', towerColumns = [], towerValuesByColumn = {}, mnoFilterColumn = '', mnoFilterValue = 'All', mnoColumns = [], mnoValuesByColumn = {}, landbankMinPopulation = 2000, landbankUrbanOnly = true, settings = null, onSettingsChange = null, onSettingsCancel = null, layersState = null, satelliteState = null, accessState = null }) {
+export function renderFilters(container, { datasets, activeDatasets, onFilterChange, onFileUpload, onKMLUpload, onExport, onClearData, onSearch, onMeasureToggle, onSyncOSM, onSyncMNO, onDatasetToggle, onDatasetDelete, onParentDatasetToggle = null, rasterLayers = {}, onDeleteRaster, towerFilterColumn = '', towerFilterValue = 'All', towerColumns = [], towerValuesByColumn = {}, mnoFilterColumn = '', mnoFilterValue = 'All', mnoColumns = [], mnoValuesByColumn = {}, landbankMinPopulation = 2000, landbankUrbanOnly = false, settings = null, onSettingsChange = null, onSettingsCancel = null, layersState = null, satelliteState = null, accessState = null }) {
   if (!container) return;
 
   const effectiveSettings = settings || {
@@ -319,7 +319,7 @@ export function renderFilters(container, { datasets, activeDatasets, onFilterCha
           </div>
         </div>
 
-        <!-- SIGNAL HEATMAP (includes sync datasets + Globe RSRP / signal rasters with delete) -->
+        <!-- SIGNAL HEATMAP (sync datasets + optional uploaded RSRP rasters with delete) -->
         <div class="layer-parent">
           <div class="layer-header" style="display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: rgba(255,152,0,0.06); border-radius: 6px;">
             <label style="display: flex; align-items: center; gap: 6px; flex: 1; cursor: pointer; margin: 0;">
@@ -369,11 +369,12 @@ export function renderFilters(container, { datasets, activeDatasets, onFilterCha
                 <span class="cb-label" style="font-weight: 500; font-size: 9px;">📍 Potential Landbank Areas</span>
               </label>
               <p style="font-size: 8px; color: #64748b; margin: 4px 0 4px 0;">
-                2–3 MNO missing, but requiring at least one anchor-tenant MNO nearby; areas too close to Our Sites are skipped.
+                Gap finder uses Settings → min distance (km) per terrain. Bronze = 3+ operators missing at sample; white = exactly 2 missing. Skips pins too close to <strong>Our Sites</strong>.
               </p>
               <p style="font-size: 7px; color: #64748b; margin: 0 0 4px 0; line-height: 1.35;" title="Landbank scans up to ~18k sample positions (stride over the map grid). MNO proximity uses a spatial index so the app stays responsive. Map = density; min pop = people in 500m–1.5km ring.">
-                <strong style="color:#94a3b8;">Note:</strong> map = density; min pop = people in radius (not the same). Candidates are nationally subsampled (~18k), not a 1 km grid. Toggle layer off/on to recompute after changing filters or MNO data.
+                <strong style="color:#94a3b8;">Map:</strong> bronze = 3+ missing · white = 2 missing. <strong style="color:#94a3b8;">Note:</strong> min pop = people in radius. Toggle off/on to recompute after MNO data changes.
               </p>
+              <div id="landbank-compute-status" style="display: none; font-size: 8px; color: #ffd600; margin-top: 6px; padding: 6px 8px; background: rgba(255,214,0,0.08); border-radius: 6px; border: 1px solid rgba(255,214,0,0.25); line-height: 1.35;"></div>
               <div class="filter-row" style="display: flex; align-items: center; gap: 6px; margin-top: 4px;">
                 <label for="landbank-min-pop" style="font-size: 8px; color: #94a3b8;">Min pop. (any ring):</label>
                 <input id="landbank-min-pop" type="number" min="0" step="500" value="${landbankMinPopulation}" title="Minimum people in the largest of WorldPop sums: 500 m, 1 km, or 1.5 km ring (avoids 500 m grid-alignment gaps). Terrain &amp; Urban/Dense filter still use the 1 km sum." style="flex: 1; font-size: 9px; padding: 2px 4px; background: #0b1121; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px;">
@@ -579,7 +580,7 @@ export function renderFilters(container, { datasets, activeDatasets, onFilterCha
       satellite: satEl ? satEl.checked : false,
       rasterVisibility,
       landbankMinPopulation: landbankMinPopEl ? Number(landbankMinPopEl.value || 0) : 2000,
-      landbankUrbanOnly: landbankUrbanOnlyEl ? landbankUrbanOnlyEl.checked : true,
+      landbankUrbanOnly: landbankUrbanOnlyEl ? landbankUrbanOnlyEl.checked : false,
       towerFilterColumn: towerColumnEl ? towerColumnEl.value : '',
       towerFilterValue: towerValueEl ? towerValueEl.value : 'All',
       mnoFilterColumn: mnoColumnEl ? mnoColumnEl.value : '',
