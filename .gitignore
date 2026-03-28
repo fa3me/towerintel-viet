@@ -40,3 +40,5 @@ towerintel-viet_vn_ppp_2020_1km_Aggregated.tif
 *.njsproj
 *.sln
 *.sw?
+
+.vercel

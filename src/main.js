@@ -394,11 +394,29 @@ function setPegmanStreetHighlight(enabled) {
     pegmanHighlightBackup.clear();
 }
 
-/** Push #map-canvas CSS size into left Deck before reading viewports (avoids stale width vs split strip). */
+/** Push MapLibre canvas CSS size into left Deck before reading viewports (avoids stale width vs split strip). */
 function syncCompareDeckLayoutFromDom() {
-    const cl = document.getElementById('map-canvas');
-    if (deck && cl && cl.clientWidth > 0 && cl.clientHeight > 0) {
-        deck.setProps({ width: cl.clientWidth, height: cl.clientHeight });
+    if (!deck) return;
+    let w = 0;
+    let h = 0;
+    if (map && typeof map.getCanvas === 'function') {
+        const c = map.getCanvas();
+        if (c && c.clientWidth > 0 && c.clientHeight > 0) {
+            w = c.clientWidth;
+            h = c.clientHeight;
+        }
+    }
+    if (!w || !h) {
+        const cl = document.getElementById('map-canvas');
+        if (cl && cl.clientWidth > 0 && cl.clientHeight > 0) {
+            w = cl.clientWidth;
+            h = cl.clientHeight;
+        }
+    }
+    if (w > 0 && h > 0) {
+        try {
+            deck.setProps({ width: w, height: h });
+        } catch (_) { /* ignore */ }
     }
 }
 
@@ -410,12 +428,26 @@ function syncCompareDeckLayoutFromDom() {
  */
 function getCompareLeftGeographicBounds() {
     if (!currentViewState) return null;
-    const cl = document.getElementById('map-canvas');
-    if (!cl || cl.clientWidth < 16 || cl.clientHeight < 16) return null;
+    let pw = 0;
+    let ph = 0;
+    if (map && typeof map.getCanvas === 'function') {
+        const c = map.getCanvas();
+        if (c) {
+            pw = c.clientWidth;
+            ph = c.clientHeight;
+        }
+    }
+    if (!pw || !ph) {
+        const cl = document.getElementById('map-canvas');
+        if (!cl) return null;
+        pw = cl.clientWidth;
+        ph = cl.clientHeight;
+    }
+    if (pw < 16 || ph < 16) return null;
     const vs = stripTransitionFields(currentViewState);
     const vp = new WebMercatorViewport({
-        width: cl.clientWidth,
-        height: cl.clientHeight,
+        width: pw,
+        height: ph,
         longitude: vs.longitude,
         latitude: vs.latitude,
         zoom: vs.zoom,
@@ -646,21 +678,16 @@ function resizeCompareBasemaps() {
 function resyncMapToDeckAfterCompare() {
     if (!map || !map.loaded() || !deck || !currentViewState) return;
     const vs = stripTransitionFields(currentViewState);
-    const mapCanvas = document.getElementById('map-canvas');
     const run = () => {
         try {
             if (typeof map.setPadding === 'function') {
                 map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
             }
         } catch (_) { /* ignore */ }
-        if (mapCanvas && mapCanvas.clientWidth > 0 && mapCanvas.clientHeight > 0) {
-            try {
-                deck.setProps({ width: mapCanvas.clientWidth, height: mapCanvas.clientHeight });
-            } catch (_) { /* ignore */ }
-        }
         try {
             map.resize();
         } catch (_) { /* ignore */ }
+        syncDeckSizeFromMapLibre();
         try {
             map.jumpTo({
                 duration: 0,
@@ -704,7 +731,7 @@ function ensureMapRightDeckOverlay() {
     try {
         mapRightDeckOverlay = new MapboxOverlay({
             interleaved: false,
-            useDevicePixels: false,
+            useDevicePixels: true,
             controller: false,
             layers: [],
             getTooltip: getDeckTooltipForMapOverlay || (() => null),
@@ -795,6 +822,86 @@ function scheduleMirrorDeckResync() {
             syncCompareDeckLayoutFromDom();
             syncCompareBasemaps();
             updateLayers();
+        });
+    });
+}
+
+/** Keep Deck + MapLibre perfectly aligned when browser/window size changes. */
+let resizeSyncRaf = 0;
+let resizeSyncDebounceTimer = null;
+let mapContainerResizeObserver = null;
+
+/** Match Deck viewport size to MapLibre's WebGL canvas (authoritative for projection). */
+function syncDeckSizeFromMapLibre() {
+    if (!deck) return;
+    let w = 0;
+    let h = 0;
+    if (map && typeof map.getCanvas === 'function') {
+        const c = map.getCanvas();
+        if (c) {
+            w = Math.max(1, Math.round(c.clientWidth));
+            h = Math.max(1, Math.round(c.clientHeight));
+        }
+    }
+    if (!w || !h) {
+        const el = document.getElementById('map-canvas');
+        if (el) {
+            const r = el.getBoundingClientRect();
+            w = Math.max(1, Math.round(r.width));
+            h = Math.max(1, Math.round(r.height));
+        }
+    }
+    if (w && h) {
+        try {
+            deck.setProps({ width: w, height: h });
+        } catch (_) { /* ignore */ }
+    }
+}
+
+function applyOverlayAfterMapResize() {
+    syncDeckSizeFromMapLibre();
+    if (state.networkIntel.comparing) {
+        syncCompareDeckLayoutFromDom();
+        syncCompareBasemaps();
+    } else if (currentViewState && map) {
+        try {
+            map.jumpTo({
+                duration: 0,
+                center: [currentViewState.longitude, currentViewState.latitude],
+                zoom: currentViewState.zoom,
+                bearing: currentViewState.bearing ?? 0,
+                pitch: currentViewState.pitch ?? 0
+            });
+        } catch (_) { /* ignore */ }
+    }
+    updateLayers();
+}
+
+function runViewportResizeSync() {
+    try {
+        if (map) map.resize();
+        if (mapRight) mapRight.resize();
+    } catch (_) { /* ignore */ }
+    requestAnimationFrame(() => {
+        applyOverlayAfterMapResize();
+    });
+}
+
+/** Debounced: ResizeObserver + visualViewport + window can fire many times per second. */
+function scheduleViewportResizeSync() {
+    if (resizeSyncDebounceTimer) clearTimeout(resizeSyncDebounceTimer);
+    resizeSyncDebounceTimer = setTimeout(() => {
+        resizeSyncDebounceTimer = null;
+        scheduleViewportResizeSyncImmediate();
+    }, 80);
+}
+
+function scheduleViewportResizeSyncImmediate() {
+    if (resizeSyncRaf) cancelAnimationFrame(resizeSyncRaf);
+    resizeSyncRaf = requestAnimationFrame(() => {
+        resizeSyncRaf = requestAnimationFrame(() => {
+            resizeSyncRaf = 0;
+            runViewportResizeSync();
         });
     });
 }
@@ -2690,13 +2797,21 @@ function initMap() {
         zoom: INITIAL_VIEW_STATE.zoom
     });
 
-    // Add Navigation Control (Compass / North)
-    map.addControl(new maplibregl.NavigationControl(), 'top-right');
-
+    // Custom zoom + compass live in bottom bar; avoid top-right MapLibre controls (overlap auth email).
 
     map.on('load', () => {
         attachAuxiliaryBasemapLayers(map);
     });
+    window.addEventListener('resize', scheduleViewportResizeSync, { passive: true });
+    window.addEventListener('focus', scheduleViewportResizeSync, { passive: true });
+    if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
+        window.visualViewport.addEventListener('resize', scheduleViewportResizeSync, { passive: true });
+    }
+    const mapContainerEl = document.querySelector('.map-container');
+    if (!mapContainerResizeObserver && mapContainerEl && typeof ResizeObserver !== 'undefined') {
+        mapContainerResizeObserver = new ResizeObserver(() => scheduleViewportResizeSync());
+        mapContainerResizeObserver.observe(mapContainerEl);
+    }
 
     // --- 3D MODE TOGGLE ---
     let is3DMode = false;
@@ -2915,8 +3030,8 @@ function initMap() {
 
     deck = new Deck({
         canvas: 'map-canvas', parent: document.querySelector('.map-container'),
-        // Align WebGL buffer 1:1 with CSS pixels so MapLibre (underlay) and Deck overlays stay locked on zoom/split.
-        useDevicePixels: false, initialViewState: currentViewState, controller: true,
+        // Use device pixel ratio to avoid marker/basemap drift at browser zoom and non-maximized windows.
+        useDevicePixels: true, initialViewState: currentViewState, controller: true,
         onHover: (info) => {
             const el = document.getElementById('cursor-coords');
             if (el) {

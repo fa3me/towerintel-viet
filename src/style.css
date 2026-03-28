@@ -111,6 +111,7 @@
 
 html,
 body {
+    width: 100%;
     height: 100%;
     font-family: var(--font);
     background: var(--bg-primary);
@@ -225,7 +226,9 @@ body {
 .app {
     display: flex;
     height: 100vh;
-    width: 100vw;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     transition: opacity 0.5s;
 }
 
@@ -633,6 +636,7 @@ body {
     flex: 1;
     position: relative;
     overflow: hidden;
+    min-width: 0;
 }
 
 /*
